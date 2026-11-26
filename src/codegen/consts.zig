@@ -8,10 +8,10 @@ const schema = @import("../zrmir/schema.zig");
 const Lowering = @import("module.zig").Lowering;
 const types = @import("types.zig");
 
-/// The constant a scalar's bytes stand for, in the form it is stored in.
+/// The constant a scalar's bytes stand for, in the form it is computed with.
 pub fn scalar(l: *const Lowering, memory: *const schema.Memory, kind: schema.Scalar) codegen.Error!llvm.LLVMValueRef {
     if (memory.relocs.len != 0) return l.unsupported("a constant that points into another allocation", .{});
-    const ty = try types.scalar(l, kind, .memory);
+    const ty = try types.scalar(l, kind, .immediate);
 
     const size = memory.bytes.len / 2;
     const uninit = std.mem.count(u8, memory.bytes, "__");
@@ -36,7 +36,11 @@ pub fn scalar(l: *const Lowering, memory: *const schema.Memory, kind: schema.Sca
         &words,
     );
     return switch (kind.primitive) {
-        .bool, .int => bits,
+        .bool => switch (words[0]) {
+            0, 1 => |bit| llvm.LLVMConstInt(ty, bit, 0),
+            else => |byte| l.malformed("a `bool` constant with the byte {d}", .{byte}),
+        },
+        .int => bits,
         .float => llvm.LLVMConstBitCast(bits, ty),
         .pointer => llvm.LLVMConstIntToPtr(bits, ty),
     };
