@@ -16,6 +16,7 @@ pub fn build(b: *std.Build) void {
 
     const options = b.addOptions();
     options.addOption([]const u8, "version", version);
+    options.addOption([]const u8, "rust_toolchain", rustToolchain(b));
 
     const zrust = b.addExecutable(.{
         .name = "zrust",
@@ -66,6 +67,20 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(zrmir_tests).step);
 
     test_step.dependOn(addShimTest(b, shim));
+}
+
+/// The channel rust-toolchain.toml pins. The driver asks rustup for exactly this toolchain: the shim is built
+/// against its compiler crates and loads into no other rustc.
+fn rustToolchain(b: *std.Build) []const u8 {
+    const file = "rust-toolchain.toml";
+    const key = "channel = \"";
+    const path = b.root.joinString(b.allocator, file) catch @panic("OOM");
+    const text = std.Io.Dir.cwd().readFileAlloc(b.graph.io, path, b.allocator, .limited(64 * 1024)) catch |err| {
+        std.process.fatal("cannot read {s}: {s}", .{ file, @errorName(err) });
+    };
+    const start = (std.mem.find(u8, text, key) orelse std.process.fatal("{s} has no channel", .{file})) + key.len;
+    const end = std.mem.findScalarPos(u8, text, start, '"') orelse std.process.fatal("{s} has no channel", .{file});
+    return text[start..end];
 }
 
 const Llvm = struct {
