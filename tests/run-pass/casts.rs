@@ -11,6 +11,11 @@ fn panic(_info: &PanicInfo) -> ! {
     loop {}
 }
 
+// libcore is compiled to unwind, and on Linux its unwind tables name this function even where panics abort. `std`
+// defines it; a `no_std` program that reaches libcore's panic functions has to.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_eh_personality() {}
+
 // As in `ops.rs`, `one` is the argument count of the process: nothing here is known while compiling.
 
 fn integers(one: i32) -> bool {
