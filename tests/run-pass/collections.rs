@@ -3,6 +3,7 @@
 // expect-stdout: hello, world
 // expect-stdout: 3 words
 // expect-stdout: caught
+// unsupported: needs phase A6 (`std`)
 
 use std::collections::BTreeMap;
 

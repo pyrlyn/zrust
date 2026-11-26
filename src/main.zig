@@ -10,7 +10,7 @@ const usage =
     \\
     \\  rustc        run the pinned rustc with zrust as its code generator
     \\  build        the same, writing into `target/` unless told where to
-    \\  dump-zrmir   keep the ZRMIR of every codegen unit and print the paths
+    \\  dump-zrmir   write the ZRMIR of every codegen unit instead of compiling, and print the paths
     \\
 ;
 
@@ -65,7 +65,7 @@ fn namesOutput(rustc_args: []const []const u8) bool {
 }
 
 const RustcOptions = struct {
-    keep_zrmir: bool = false,
+    zrmir_only: bool = false,
 };
 
 /// Runs the pinned rustc with the shim as its backend, and returns rustc's exit code.
@@ -90,7 +90,7 @@ fn runRustc(init: std.process.Init, rustc_args: []const []const u8, options: Rus
 
     var environ = try init.environ_map.clone(arena);
     try environ.put("ZRUST_CODEGEN", codegen);
-    if (options.keep_zrmir) try environ.put("ZRUST_KEEP_ZRMIR", "1");
+    if (options.zrmir_only) try environ.put("ZRUST_ZRMIR_ONLY", "1");
 
     // `rustup run` rather than a bare `rustc`: the shim is built against one nightly's unstable compiler crates and
     // loads into no other, whatever toolchain the directory or the environment would otherwise select.
@@ -136,7 +136,7 @@ fn dumpZrmir(init: std.process.Init, rustc_args: []const []const u8, out: *std.I
     }
 
     const argv = try std.mem.concat(arena, []const u8, &.{ rustc_args, &.{ "--out-dir", out_dir } });
-    const code = try runRustc(init, argv, .{ .keep_zrmir = true });
+    const code = try runRustc(init, argv, .{ .zrmir_only = true });
     if (code != 0) return code;
 
     for (try zrmirFiles(arena, io, out_dir)) |name| {

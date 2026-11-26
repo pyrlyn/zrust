@@ -5,14 +5,17 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use rustc_codegen_ssa::back::archive::ArArchiveBuilderBuilder;
+use rustc_codegen_ssa::back::link::link_binary;
 use rustc_codegen_ssa::target_features::internal_target_features;
 use rustc_codegen_ssa::traits::CodegenBackend;
-use rustc_codegen_ssa::{CompiledModules, CrateInfo, TargetConfig};
+use rustc_codegen_ssa::{CompiledModule, CompiledModules, CrateInfo, ModuleKind, TargetConfig};
 use rustc_metadata::EncodedMetadata;
 use rustc_middle::dep_graph::WorkProductMap;
 use rustc_middle::mono::MonoItemPartitions;
 use rustc_middle::ty::TyCtxt;
 use rustc_session::config::OutputFilenames;
+use rustc_session::output::OutputType;
 use rustc_session::{EarlySession, IncrCompSession, Session};
 use smallvec::{SmallVec, smallvec};
 
@@ -22,6 +25,8 @@ use crate::{encode, zrmir};
 const CODEGEN_ENV: &str = "ZRUST_CODEGEN";
 /// When set, the ZRMIR files outlive the compilation.
 const KEEP_ENV: &str = "ZRUST_KEEP_ZRMIR";
+/// When set, the ZRMIR files are all the compilation produces: no code is generated and nothing is linked.
+const ZRMIR_ONLY_ENV: &str = "ZRUST_ZRMIR_ONLY";
 
 pub struct ZrustBackend;
 
@@ -50,7 +55,7 @@ impl CodegenBackend for ZrustBackend {
 
         TargetConfig {
             internal_target_features,
-            // Nothing is generated yet, so no `f16`/`f128` support can be promised.
+            // The code generator refuses the `f16b` format and has never compiled an operation on the others.
             has_reliable_f16: false,
             has_reliable_f16_math: false,
             has_reliable_f16b: false,
@@ -68,68 +73,127 @@ impl CodegenBackend for ZrustBackend {
     }
 
     fn codegen_crate<'tcx>(&self, tcx: TyCtxt<'tcx>) -> Box<dyn Any> {
+        // rustc's own target-feature bookkeeping accepts the flag (see `target_config`), but the features never reach
+        // LLVM, so code compiled as if they were on would run without them.
+        if !tcx.sess.opts.cg.target_feature.is_empty() {
+            tcx.dcx().fatal("zrust: `-C target-feature` is not supported yet");
+        }
+
         let MonoItemPartitions { codegen_units, .. } = tcx.collect_and_partition_mono_items(());
         let outputs = tcx.output_filenames(());
         let cpu = self.target_cpu(tcx.sess);
 
         // One `run` for the whole crate: rustc_public's handles are only valid inside it.
         let encoded = rustc_public::rustc_internal::run(tcx, || {
-            let mut files = Vec::with_capacity(codegen_units.len());
+            let mut units = Vec::with_capacity(codegen_units.len());
             for cgu in codegen_units {
-                let path = outputs.temp_path_ext_for_cgu("zrmir", cgu.name().as_str());
+                let name = cgu.name();
+                let name = name.as_str();
+                let zrmir = outputs.temp_path_ext_for_cgu("zrmir", name);
                 let module = encode::encode_cgu(tcx, cgu, cpu.clone());
-                if let Err(error) = write_module(&path, &module) {
-                    tcx.dcx().fatal(format!("zrust: cannot write {}: {error}", path.display()));
+                if let Err(error) = write_module(&zrmir, &module) {
+                    tcx.dcx().fatal(format!("zrust: cannot write {}: {error}", zrmir.display()));
                 }
-                files.push(path);
+                units.push(Unit { name: name.to_owned(), zrmir, object: outputs.temp_path_for_cgu(OutputType::Object, name) });
             }
-            files
+            units
         });
-        let files = encoded.unwrap_or_else(|error| tcx.dcx().fatal(format!("zrust: {error}")));
+        let units = encoded.unwrap_or_else(|error| tcx.dcx().fatal(format!("zrust: {error}")));
 
-        if let Some(codegen) = std::env::var_os(CODEGEN_ENV) {
-            check_modules(tcx, &codegen, &files);
+        let zrmir_only = is_set(ZRMIR_ONLY_ENV);
+        let keep = zrmir_only || is_set(KEEP_ENV);
+        let Some(codegen) = std::env::var_os(CODEGEN_ENV) else {
+            tcx.dcx().fatal(format!("zrust: {CODEGEN_ENV} is not set; run rustc through the `zrust` driver"))
+        };
+
+        // One process per module, one after another. The modules are independent, so this can become a pool.
+        let failure = if zrmir_only {
+            run_codegen(&codegen, |command| command.arg("--check").arg("--in").args(units.iter().map(|unit| &unit.zrmir)))
+                .err()
+                .map(|output| format!("zrust: {} rejected the ZRMIR{output}", codegen.display()))
+        } else {
+            units.iter().find_map(|unit| {
+                run_codegen(&codegen, |command| command.arg("--in").arg(&unit.zrmir).arg("--out").arg(&unit.object))
+                    .err()
+                    .map(|output| format!("zrust: {} could not compile `{}`{output}", codegen.display(), unit.name))
+            })
+        };
+
+        if !keep {
+            for unit in &units {
+                // A leftover file is harmless, and a failure to remove it is not worth a diagnostic.
+                let _ = std::fs::remove_file(&unit.zrmir);
+            }
+        }
+        if let Some(failure) = failure {
+            let mut error = tcx.dcx().struct_fatal(failure);
+            if !keep {
+                error.note(format!("set {KEEP_ENV}=1 to keep the ZRMIR of the build"));
+            }
+            error.emit()
         }
 
-        if std::env::var_os(KEEP_ENV).is_some_and(|value| !value.is_empty()) {
+        if zrmir_only {
             // Dumping ZRMIR was the point of this run, so it succeeds, but says that it produced nothing else.
-            let mut warning =
-                tcx.dcx().struct_warn("zrust: code generation is not implemented yet, nothing is compiled or linked");
-            for file in &files {
-                warning.note(format!("wrote {}", file.display()));
+            let mut warning = tcx.dcx().struct_warn("zrust: only ZRMIR was asked for, nothing is compiled or linked");
+            for unit in &units {
+                warning.note(format!("wrote {}", unit.zrmir.display()));
             }
             warning.emit();
-            return Box::new(());
+            return Box::new(None::<Vec<CompiledModule>>);
         }
 
-        for file in &files {
-            // A leftover file is harmless, and the error below is the one worth reporting.
-            let _ = std::fs::remove_file(file);
-        }
-        tcx.dcx().fatal("zrust: code generation is not implemented yet")
+        let modules = units.into_iter().map(|unit| CompiledModule {
+            name: unit.name,
+            kind: ModuleKind::Regular,
+            object: Some(unit.object),
+            global_asm_object: None,
+            dwarf_object: None,
+            bytecode: None,
+            assembly: None,
+            llvm_ir: None,
+        });
+        Box::new(Some(modules.collect::<Vec<_>>()))
     }
 
     fn join_codegen(
         &self,
-        _ongoing_codegen: Box<dyn Any>,
+        ongoing_codegen: Box<dyn Any>,
         _sess: &Session,
         _incr_comp_session: Option<&IncrCompSession>,
         _outputs: &OutputFilenames,
         _crate_info: &CrateInfo,
     ) -> (CompiledModules, WorkProductMap) {
-        (CompiledModules { modules: Vec::new(), allocator_module: None }, WorkProductMap::default())
+        let modules = ongoing_codegen.downcast::<Option<Vec<CompiledModule>>>().expect("the value `codegen_crate` returned");
+        // A program with a global allocator needs a module that routes `__rust_alloc` to it; none is generated yet.
+        (CompiledModules { modules: modules.unwrap_or_default(), allocator_module: None }, WorkProductMap::default())
     }
 
     fn link(
         &self,
-        _sess: &Session,
-        _compiled_modules: CompiledModules,
-        _crate_info: CrateInfo,
-        _metadata: EncodedMetadata,
-        _outputs: &OutputFilenames,
+        sess: &Session,
+        compiled_modules: CompiledModules,
+        crate_info: CrateInfo,
+        metadata: EncodedMetadata,
+        outputs: &OutputFilenames,
     ) {
-        // rustc only gets here on a ZRMIR dump (see `codegen_crate`), and no object files exist to link.
+        // A ZRMIR dump has no objects, and linking nothing would leave an empty library or a failed link behind.
+        if is_set(ZRMIR_ONLY_ENV) {
+            return;
+        }
+        link_binary(sess, &ArArchiveBuilderBuilder, compiled_modules, crate_info, metadata, outputs, self.name());
     }
+}
+
+/// One codegen unit on its way through `zrust-codegen`.
+struct Unit {
+    name: String,
+    zrmir: PathBuf,
+    object: PathBuf,
+}
+
+fn is_set(variable: &str) -> bool {
+    std::env::var_os(variable).is_some_and(|value| !value.is_empty())
 }
 
 fn write_module(path: &Path, module: &zrmir::Module) -> std::io::Result<()> {
@@ -138,15 +202,12 @@ fn write_module(path: &Path, module: &zrmir::Module) -> std::io::Result<()> {
     file.flush()
 }
 
-/// Has `zrust-codegen` read back every file, so a mismatch between the encoder and the decoder fails the build that
-/// produced it.
-fn check_modules(tcx: TyCtxt<'_>, codegen: &OsStr, files: &[PathBuf]) {
-    let output = match Command::new(codegen).arg("--check").arg("--in").args(files).output() {
-        Ok(output) => output,
-        Err(error) => tcx.dcx().fatal(format!("zrust: cannot run {}: {error}", codegen.display())),
-    };
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        tcx.dcx().fatal(format!("zrust: {} rejected the ZRMIR ({}):\n{}", codegen.display(), output.status, stderr.trim_end()));
+/// Runs `zrust-codegen`. On failure, returns what it has to say, ready to follow the caller's own sentence.
+fn run_codegen(codegen: &OsStr, arguments: impl FnOnce(&mut Command) -> &mut Command) -> Result<(), String> {
+    let mut command = Command::new(codegen);
+    match arguments(&mut command).output() {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => Err(format!(" ({}):\n{}", output.status, String::from_utf8_lossy(&output.stderr).trim_end())),
+        Err(error) => Err(format!(": it cannot be run: {error}")),
     }
 }

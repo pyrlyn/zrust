@@ -2,6 +2,7 @@
 // expect-stdout: 3
 // expect-stdout: 30
 // expect-stdout: 6
+// unsupported: needs phase A6 (`std`)
 
 fn apply(f: impl Fn(i32) -> i32, value: i32) -> i32 {
     f(value)

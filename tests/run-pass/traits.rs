@@ -2,6 +2,7 @@
 // expect-stdout: meow
 // expect-stdout: 2 legs total 8
 // expect-stdout: dropped rex
+// unsupported: needs phase A6 (`std`)
 
 trait Animal {
     fn name(&self) -> &str;

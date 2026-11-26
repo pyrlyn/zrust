@@ -3,6 +3,7 @@
 // expect-stdout: none
 // expect-stdout: some 7
 // expect-stdout: less
+// unsupported: needs phase A6 (`std`)
 
 use std::cmp::Ordering;
 
