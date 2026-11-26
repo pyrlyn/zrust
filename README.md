@@ -2,13 +2,24 @@
 
 **ZRust** is an experimental Rust compiler written in **Zig** with an **LLVM** backend.
 
-- **Status:** planning — no code yet. This README contains the full plan; the same text lives in [`docs/PLAN.md`](docs/PLAN.md).
+- **Status:** phase A0 — the build skeleton exists, nothing compiles Rust yet. This README contains the full plan; the same text lives in [`docs/PLAN.md`](docs/PLAN.md). Tasks are tracked in [`plan/`](plan/README.md).
 - **Recommended path:** reuse the existing `rustc` frontend through `rustc_private` / `rustc_public` and write the backend (MIR → LLVM IR → object) and the driver in Zig. Step-by-step instructions for an implementing agent: [`docs/AGENT_PROMPT.md`](docs/AGENT_PROMPT.md).
 - **Alternative path:** a from-scratch frontend in Zig, sharing the same backend.
 
 > **Disclaimer.** This is an unofficial, independent project. It is **not affiliated with, endorsed by, or sponsored by the official Rust project or Rust Foundation**. "Rust" and its logo are trademarks of Rust Foundation ([policy](https://rustfoundation.org/policy/rust-trademark-policy/)). The name "ZRust" still contains "Rust", so Rust Foundation's trademark policy may still apply to it; it is less risky than the earlier working name, and remains provisional.
 
 License: not chosen yet.
+
+## Building
+
+Needs [mise](https://mise.jdx.dev/) and [rustup](https://rustup.rs/). Supported hosts: macOS arm64 and Linux x86_64.
+
+```sh
+mise install    # Zig 0.17.1 and LLVM 22 (mise.toml)
+zig build       # rustup installs the pinned nightly (rust-toolchain.toml) on first use
+```
+
+This produces `zig-out/bin/zrust`, `zig-out/bin/zrust-codegen` and `zig-out/lib/libzrust_shim.{dylib,so}`. To use another LLVM 22 install, pass `-Dllvm-config=<path to llvm-config>`. Tools and versions are listed in [`toolchain.md`](toolchain.md).
 
 ---
 

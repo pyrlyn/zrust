@@ -1,0 +1,10 @@
+[package]
+name = "zrust_shim"
+version = "0.0.0"
+edition = "2024"
+
+[lib]
+crate-type = ["dylib"]
+
+[package.metadata.rust-analyzer]
+rustc_private = true

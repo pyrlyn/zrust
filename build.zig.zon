@@ -1,0 +1,14 @@
+.{
+    .name = .zrust,
+    .version = "0.0.0",
+    .fingerprint = 0xb53652cf69d6b6c7,
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "shim",
+        "rust-toolchain.toml",
+    },
+}
