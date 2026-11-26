@@ -1,15 +1,15 @@
-# Agent prompt: continue "The Rust" via the reuse track (Track A)
+# Agent prompt: continue "ZRust" via the reuse track (Track A)
 
-You are an engineering agent continuing the project **The Rust** (repository `pyrlyn/the-rust`): a Rust compiler whose own code is written in **Zig** and which emits machine code through **LLVM**. Your job is to implement **Track A** from [`docs/PLAN.md`](PLAN.md): reuse the existing `rustc` frontend and middle end through `rustc_private`, and write the **backend and the driver in Zig**. Rust code is allowed **only** in one thin shim crate, and only where rustc's APIs can be called from Rust alone.
+You are an engineering agent continuing the project **ZRust** (repository `pyrlyn/zrust`): a Rust compiler whose own code is written in **Zig** and which emits machine code through **LLVM**. Your job is to implement **Track A** from [`docs/PLAN.md`](PLAN.md): reuse the existing `rustc` frontend and middle end through `rustc_private`, and write the **backend and the driver in Zig**. Rust code is allowed **only** in one thin shim crate, and only where rustc's APIs can be called from Rust alone.
 
 Read this whole file before writing code. Follow the phases in order; each phase has exit criteria and verification commands. Do not skip ahead.
 
 ## 0. Ground rules
 - All docs, comments, commit messages and PR text in **English**.
-- Every change goes through a **pull request** on `pyrlyn/the-rust`. Never push to `main`, never force-push, never merge without the owner's explicit request and green CI.
+- Every change goes through a **pull request** on `pyrlyn/zrust`. Never push to `main`, never force-push, never merge without the owner's explicit request and green CI.
 - Do not add third-party dependencies (Zig packages, crates) without the owner's approval. Exceptions already approved by this plan: LLVM 22 (system), the pinned Rust nightly with `rustc-dev`, `serde`/`serde_json` inside the shim (they come with the toolchain's `rustc_public`).
-- Keep the shim small. If you are about to write real logic in Rust, stop: move it to Zig and pass the data through TRMIR.
-- Project is unofficial; keep the non-affiliation notice in README. "Rust" is a Rust Foundation trademark — the final name is an open question for the owner.
+- Keep the shim small. If you are about to write real logic in Rust, stop: move it to Zig and pass the data through ZRMIR.
+- Project is unofficial; keep the non-affiliation notice in README. "Rust" is a Rust Foundation trademark and "ZRust" still contains it, so the policy may still apply — the final name is the owner's decision.
 
 ## 1. Pinned versions
 | Component | Version | Why |
@@ -53,57 +53,57 @@ Bumping the nightly is its own PR with a checklist: update the pin, rebuild shim
 ### 2.2 Built from scratch
 | Part | Language | Location |
 |---|---|---|
-| `the-rust` CLI driver (wraps `rustc`/`cargo`) | Zig | `src/main.zig`, `src/driver/` |
-| TRMIR format: schema, decoder | Zig (decoder), Rust (encoder in shim) | `docs/TRMIR.md`, `src/trmir/`, `shim/src/trmir.rs` |
+| `zrust` CLI driver (wraps `rustc`/`cargo`) | Zig | `src/main.zig`, `src/driver/` |
+| ZRMIR format: schema, decoder | Zig (decoder), Rust (encoder in shim) | `docs/ZRMIR.md`, `src/zrmir/`, `shim/src/zrmir.rs` |
 | MIR → LLVM IR lowering (types, places, rvalues, terminators, drops, intrinsics, consts/allocations, vtables) | Zig | `src/codegen/` |
 | LLVM wrapper: module/target machine/pass pipeline/object emission/debug info | Zig over LLVM-C | `src/llvm/` |
-| `the-rust-codegen` executable (one CGU in, one `.o` out) | Zig | `src/codegen_main.zig` |
+| `zrust-codegen` executable (one CGU in, one `.o` out) | Zig | `src/codegen_main.zig` |
 | Entry shim (`main` → `std::rt::lang_start`), allocator shim (`__rust_alloc` → `__rdl_alloc`/`#[global_allocator]`) | Zig | `src/codegen/shims.zig` |
-| `CodegenBackend` implementation and TRMIR encoder | Rust (thin) | `shim/` |
+| `CodegenBackend` implementation and ZRMIR encoder | Rust (thin) | `shim/` |
 | Test harness: goldens, rustc UI subset runner, differential vs stock rustc and Miri | Zig + shell | `tests/` |
 
 ## 3. Architecture
 
 ```
-the-rust (Zig)                                    # user-facing CLI
+zrust (Zig)                                    # user-facing CLI
   │  exec
   ▼
-rustc +nightly-2026-11-24 -Zcodegen-backend=<repo>/zig-out/lib/libthe_rust_shim.{dylib,so} <args>
+rustc +nightly-2026-11-24 -Zcodegen-backend=<repo>/zig-out/lib/libzrust_shim.{dylib,so} <args>
   │  frontend + middle end (reused)
   ▼
-the_rust_shim::TheRustBackend::codegen_crate(tcx)  # Rust, thin
-  │  for each CGU: rustc_public view → <out>/<crate>.<cgu>.trmir   (types, layouts, FnAbi, bodies, allocations)
+zrust_shim::ZRustBackend::codegen_crate(tcx)  # Rust, thin
+  │  for each CGU: rustc_public view → <out>/<crate>.<cgu>.zrmir   (types, layouts, FnAbi, bodies, allocations)
   │  spawn
   ▼
-the-rust-codegen --in X.trmir --out X.o --target <triple> --cpu <cpu> --opt <0..3>   # Zig + LLVM 22
+zrust-codegen --in X.zrmir --out X.o --target <triple> --cpu <cpu> --opt <0..3>   # Zig + LLVM 22
   ▼
 join_codegen → CompiledModules{ .o files } → default link() → link_binary → cc / ld.lld
 ```
 
-Why out of process: `librustc_driver` statically contains rustc's own LLVM. Loading libLLVM 22 into the same process risks duplicate-symbol and global-state clashes and ties us to rustc's LLVM version. Files + a subprocess also give free parallelism per CGU, crash isolation, and reproducible repro files (`.trmir` can be attached to bug reports). An in-process C ABI (`export fn the_rust_codegen(req: *const TrRequest) callconv(.c) c_int`) is a later optimisation, allowed only if the Zig side then emits bitcode without libLLVM (like Zig's own compiler) or the LLVM versions match.
+Why out of process: `librustc_driver` statically contains rustc's own LLVM. Loading libLLVM 22 into the same process risks duplicate-symbol and global-state clashes and ties us to rustc's LLVM version. Files + a subprocess also give free parallelism per CGU, crash isolation, and reproducible repro files (`.zrmir` can be attached to bug reports). An in-process C ABI (`export fn zrust_codegen(req: *const ZrRequest) callconv(.c) c_int`) is a later optimisation, allowed only if the Zig side then emits bitcode without libLLVM (like Zig's own compiler) or the LLVM versions match.
 
-Alternative considered: a `rustc_driver` wrapper binary using `rustc_driver::Callbacks::after_analysis` + `Compilation::Stop` (e.g. via `rustc_public::run!`). Use it **only** for analysis tools (TRMIR dumps of a single crate, the Rust-to-Rust printer). For full builds the `-Zcodegen-backend` path is better because rustc keeps doing metadata, rlibs, linking and cargo integration.
+Alternative considered: a `rustc_driver` wrapper binary using `rustc_driver::Callbacks::after_analysis` + `Compilation::Stop` (e.g. via `rustc_public::run!`). Use it **only** for analysis tools (ZRMIR dumps of a single crate, Rust-to-Rust printer). For full builds the `-Zcodegen-backend` path is better because rustc keeps doing metadata, rlibs, linking and cargo integration.
 
 ## 4. Repository layout to create
 ```
 rust-toolchain.toml
-build.zig                 # builds zig binaries AND runs `cargo build --release -p the_rust_shim`
+build.zig                 # builds zig binaries AND runs `cargo build --release -p zrust_shim`
 build.zig.zon
 src/
-  main.zig                # the-rust CLI
-  codegen_main.zig        # the-rust-codegen
+  main.zig                # zrust CLI
+  codegen_main.zig        # zrust-codegen
   driver/{toolchain.zig, args.zig, cargo.zig}
-  trmir/{schema.zig, decode.zig}
+  zrmir/{schema.zig, decode.zig}
   codegen/{module.zig, types.zig, abi.zig, place.zig, rvalue.zig, terminator.zig, consts.zig, intrinsics.zig, shims.zig, debuginfo.zig}
   llvm/{c.zig, target.zig, passes.zig, emit.zig}
 shim/
   Cargo.toml              # [lib] crate-type = ["dylib"]  (rustc loads it with dlopen)
-  src/{lib.rs, backend.rs, trmir.rs, spawn.rs}
+  src/{lib.rs, backend.rs, zrmir.rs, spawn.rs}
 tests/
   run-pass/*.rs           # own programs with expected stdout
   ui-subset.txt           # list of rustc tests/ui run-pass tests we must pass
   run_ui.sh, diff.sh
-docs/{PLAN.md, AGENT_PROMPT.md, TRMIR.md, NIGHTLY_BUMPS.md}
+docs/{PLAN.md, AGENT_PROMPT.md, ZRMIR.md, NIGHTLY_BUMPS.md}
 ```
 
 ## 5. The shim (Rust, `shim/`)
@@ -111,7 +111,7 @@ docs/{PLAN.md, AGENT_PROMPT.md, TRMIR.md, NIGHTLY_BUMPS.md}
 `shim/Cargo.toml`:
 ```toml
 [package]
-name = "the_rust_shim"
+name = "zrust_shim"
 version = "0.0.0"
 edition = "2024"
 
@@ -138,15 +138,15 @@ use rustc_codegen_ssa::traits::CodegenBackend;
 use rustc_middle::ty::TyCtxt;
 use rustc_session::Session;
 
-pub struct TheRustBackend;
+pub struct ZRustBackend;
 
-impl CodegenBackend for TheRustBackend {
-    fn name(&self) -> &'static str { "the_rust" }
+impl CodegenBackend for ZRustBackend {
+    fn name(&self) -> &'static str { "zrust" }
     fn target_cpu(&self, sess: &Session) -> String { /* sess.opts.cg.target_cpu or target default */ }
     fn codegen_crate<'tcx>(&self, tcx: TyCtxt<'tcx>) -> Box<dyn Any> {
         // 1. let (_, cgus) = tcx.collect_and_partition_mono_items(()) — internal API
-        // 2. rustc_public::rustc_internal::run(tcx, || { encode each CGU to TRMIR })
-        // 3. spawn `the-rust-codegen` per CGU (path from env THE_RUST_CODEGEN), keep the handles
+        // 2. rustc_public::rustc_internal::run(tcx, || { encode each CGU to ZRMIR })
+        // 3. spawn `zrust-codegen` per CGU (path from env ZRUST_CODEGEN), keep the handles
         // 4. return Box::new(OngoingCodegen { modules, crate_info, .. })
     }
     fn join_codegen(/* exact args from pinned nightly */) -> /* CompiledModules */ {
@@ -157,7 +157,7 @@ impl CodegenBackend for TheRustBackend {
 }
 
 #[unsafe(no_mangle)]
-pub fn __rustc_codegen_backend() -> Box<dyn CodegenBackend> { Box::new(TheRustBackend) }
+pub fn __rustc_codegen_backend() -> Box<dyn CodegenBackend> { Box::new(ZRustBackend) }
 ```
 Reference implementations to read side by side: cg_clif [`src/lib.rs`](https://github.com/rust-lang/rustc_codegen_cranelift/blob/master/src/lib.rs) (`codegen_crate`, `join_codegen`, `__rustc_codegen_backend`), [`src/driver/aot.rs`](https://github.com/rust-lang/rustc_codegen_cranelift/blob/master/src/driver/aot.rs) (CGU loop, `CompiledModules`), [`src/main_shim.rs`](https://github.com/rust-lang/rustc_codegen_cranelift/blob/master/src/main_shim.rs), [`src/allocator.rs`](https://github.com/rust-lang/rustc_codegen_cranelift/blob/master/src/allocator.rs); [rustc_codegen_gcc `src/lib.rs`](https://github.com/rust-lang/rustc_codegen_gcc/blob/master/src/lib.rs); [rustc_codegen_clr](https://github.com/FractalFir/rustc_codegen_clr) for a backend that emits a different IR in a separate tool; [Kani](https://github.com/model-checking/kani) and [Charon](https://github.com/AeneasVerif/charon) for large `rustc_public`/MIR consumers.
 
@@ -166,28 +166,28 @@ APIs the encoder uses (`rustc_public`, all verified in nightly docs):
 - `mir::mono::Instance`: `body()`, `fn_abi()`, `mangled_name()`, `intrinsic_name()`, `is_empty_shim()`, `resolve_drop_in_place(ty)`, `try_const_eval(ty)`.
 - `mir::mono::MonoItem::{Fn, Static, GlobalAsm}`, `StaticDef::eval_initializer()`.
 - `mir::Body` (blocks, locals, `arg_locals`, var debug info), `ty::Ty::layout()` → `LayoutShape` (size, align, fields offsets, variants, abi), `ty::Allocation` (bytes + provenance → relocations), `entry_fn()`.
-- `rustc_public` types implement `serde::Serialize`, but `Ty`/`Span`/`DefId` serialize as opaque indices. TRMIR therefore needs **its own tables**: a type table (kind + layout), a function-ABI table, an allocation table, a symbol table. Do not depend on rustc_public's serialized shape.
+- `rustc_public` types implement `serde::Serialize`, but `Ty`/`Span`/`DefId` serialize as opaque indices. ZRMIR therefore needs **its own tables**: a type table (kind + layout), a function-ABI table, an allocation table, a symbol table. Do not depend on rustc_public's serialized shape.
 
-## 6. TRMIR (document it in `docs/TRMIR.md` first)
-- One file per CGU: header (`magic "TRMIR"`, version, target triple, data layout string from `tcx.data_layout`, pointer width, panic strategy), then tables: `types[]`, `layouts[]`, `fn_abis[]`, `allocs[]`, `symbols[]`, `functions[]` (mangled name, linkage, visibility, ABI id, MIR body), `statics[]`, `entry` (optional), `allocator_shim` (optional).
-- Phase A2 uses **JSON** (easy to diff, `serde_json` from the toolchain). Switch to a compact binary encoding in A8 only if profiling says so; keep JSON as `--trmir-format=json` for debugging.
+## 6. ZRMIR (document it in `docs/ZRMIR.md` first)
+- One file per CGU: header (`magic "ZRMIR"`, version, target triple, data layout string from `tcx.data_layout`, pointer width, panic strategy), then tables: `types[]`, `layouts[]`, `fn_abis[]`, `allocs[]`, `symbols[]`, `functions[]` (mangled name, linkage, visibility, ABI id, MIR body), `statics[]`, `entry` (optional), `allocator_shim` (optional).
+- Phase A2 uses **JSON** (easy to diff, `serde_json` from the toolchain). Switch to a compact binary encoding in A8 only if profiling says so; keep JSON as `--zrmir-format=json` for debugging.
 - The decoder in Zig is strict: unknown tags are hard errors with the file offset/path.
 
 ## 7. The Zig backend (`src/codegen`, `src/llvm`)
 - `src/llvm/c.zig`: `pub const c = @cImport({ @cInclude("llvm-c/Core.h"); @cInclude("llvm-c/TargetMachine.h"); @cInclude("llvm-c/Target.h"); @cInclude("llvm-c/Analysis.h"); @cInclude("llvm-c/Transforms/PassBuilder.h"); @cInclude("llvm-c/DebugInfo.h"); });`
-- `build.zig`: find LLVM 22 via `llvm-config --includedir --libdir --libs` (Homebrew: `/opt/homebrew/opt/llvm@22`; Linux: `apt.llvm.org` `llvm-22-dev`), link it to `the-rust-codegen` only.
-- Lowering strategy (same as `rustc_codegen_ssa`, but in Zig): every MIR local → `alloca` (let `mem2reg`/SROA clean up); scalar/scalar-pair locals as SSA later. Types from TRMIR **layouts**, not from Rust types: `Scalar` → int/float/ptr, `ScalarPair` → `{a, b}`, `Aggregate` → `[size x i8]` with GEP by byte offset. Calls use `FnAbi` (`PassMode::{Ignore, Direct, Pair, Cast, Indirect}`) to build LLVM signatures and attributes.
+- `build.zig`: find LLVM 22 via `llvm-config --includedir --libdir --libs` (Homebrew: `/opt/homebrew/opt/llvm@22`; Linux: `apt.llvm.org` `llvm-22-dev`), link it to `zrust-codegen` only.
+- Lowering strategy (same as `rustc_codegen_ssa`, but in Zig): every MIR local → `alloca` (let `mem2reg`/SROA clean up); scalar/scalar-pair locals as SSA later. Types from ZRMIR **layouts**, not from Rust types: `Scalar` → int/float/ptr, `ScalarPair` → `{a, b}`, `Aggregate` → `[size x i8]` with GEP by byte offset. Calls use `FnAbi` (`PassMode::{Ignore, Direct, Pair, Cast, Indirect}`) to build LLVM signatures and attributes.
 - Entry points:
-  - `pub fn lowerModule(gpa: std.mem.Allocator, cgu: *const trmir.Cgu, ctx: *llvm.Context) !llvm.Module`
+  - `pub fn lowerModule(gpa: std.mem.Allocator, cgu: *const zrmir.Cgu, ctx: *llvm.Context) !llvm.Module`
   - `pub fn emitObject(m: llvm.Module, tm: llvm.TargetMachine, opt: OptLevel, out_path: [:0]const u8) !void` → `LLVMRunPasses(m, "default<O2>", tm, opts)` then `LLVMTargetMachineEmitToFile`.
   - `src/codegen_main.zig`: `pub fn main() !u8` parsing `--in --out --target --cpu --opt --emit=obj|llvm-ir|bc`.
 - Always `LLVMVerifyModule` in debug builds; `--emit=llvm-ir` writes `.ll` next to `.o` for inspection.
 
-## 8. The Zig driver (`the-rust`)
-- `the-rust rustc <rustc args…>`: resolve rustc with `rustup which rustc --toolchain nightly-2026-11-24`, then exec it with `-Zcodegen-backend=<abs path to libthe_rust_shim>` and env `THE_RUST_CODEGEN=<abs path to the-rust-codegen>`.
-- `the-rust build file.rs [-O] [-o out]`: sugar for the above.
-- `the-rust cargo <cmd…>`: exec `cargo +nightly-2026-11-24 <cmd>` with `RUSTFLAGS="-Zcodegen-backend=<shim>"` appended and `THE_RUST_CODEGEN` set.
-- `the-rust dump-trmir file.rs`: run with `THE_RUST_KEEP_TRMIR=1`, print paths.
+## 8. The Zig driver (`zrust`)
+- `zrust rustc <rustc args…>`: resolve rustc with `rustup which rustc --toolchain nightly-2026-11-24`, then exec it with `-Zcodegen-backend=<abs path to libzrust_shim>` and env `ZRUST_CODEGEN=<abs path to zrust-codegen>`.
+- `zrust build file.rs [-O] [-o out]`: sugar for the above.
+- `zrust cargo <cmd…>`: exec `cargo +nightly-2026-11-24 <cmd>` with `RUSTFLAGS="-Zcodegen-backend=<shim>"` appended and `ZRUST_CODEGEN` set.
+- `zrust dump-zrmir file.rs`: run with `ZRUST_KEEP_ZRMIR=1`, print paths.
 - On macOS a standalone `rustc_driver`-based binary needs `DYLD_LIBRARY_PATH=$(rustc +nightly-2026-11-24 --print sysroot)/lib`; the `-Zcodegen-backend` route does not, because rustc itself loads the shim.
 
 ## 9. Phases, exit criteria, verification
@@ -195,25 +195,25 @@ APIs the encoder uses (`rustc_public`, all verified in nightly docs):
 | Phase | Work | Exit criterion | Verify |
 |---|---|---|---|
 | **A0** Toolchain + skeleton | `rust-toolchain.toml`, `build.zig`, empty `shim`, CI (macOS arm64 + Linux x86_64) | `zig build` builds both binaries and the shim | `rustup toolchain install nightly-2026-11-24 -c rust-src -c rustc-dev -c llvm-tools && zig build && ls zig-out/bin zig-out/lib` |
-| **A1** Logging shim | Shim implements `CodegenBackend`; `codegen_crate` only logs every CGU and its mono items, then stops with a fatal "not implemented" diagnostic | rustc loads the backend and prints the CGU list for `hello.rs` | `rustc +nightly-2026-11-24 -Zcodegen-backend=$PWD/zig-out/lib/libthe_rust_shim.dylib tests/run-pass/hello.rs` shows our log line |
-| **A2** TRMIR dump | Encoder for types, layouts, FnAbi, bodies, allocations; `docs/TRMIR.md`; Zig decoder that round-trips | Decoder reads every CGU of `tests/run-pass/*` and of a 2k-line crate without errors | `THE_RUST_KEEP_TRMIR=1 zig-out/bin/the-rust build tests/run-pass/hello.rs && zig-out/bin/the-rust-codegen --in target/*.trmir --check` |
+| **A1** Logging shim | Shim implements `CodegenBackend`; `codegen_crate` only logs every CGU and its mono items, then stops with a fatal "not implemented" diagnostic | rustc loads the backend and prints the CGU list for `hello.rs` | `rustc +nightly-2026-11-24 -Zcodegen-backend=$PWD/zig-out/lib/libzrust_shim.dylib tests/run-pass/hello.rs` shows our log line |
+| **A2** ZRMIR dump | Encoder for types, layouts, FnAbi, bodies, allocations; `docs/ZRMIR.md`; Zig decoder that round-trips | Decoder reads every CGU of `tests/run-pass/*` and of a 2k-line crate without errors | `ZRUST_KEEP_ZRMIR=1 zig-out/bin/zrust build tests/run-pass/hello.rs && zig-out/bin/zrust-codegen --in target/*.zrmir --check` |
 | **A3** First code | `#![no_std] #![no_main]` + `#[no_mangle] extern "C" fn main() -> i32 { 42 }`: integer constants, returns, locals, `Assign`, `Return` | Binary exits with 42 | `./a.out; echo $?` → `42` |
 | **A4** Control flow + calls | `Goto`, `SwitchInt`, `Call`, `Assert`(abort), binary/unary ops with overflow checks, casts, function pointers | Fibonacci, loops, recursion in `tests/run-pass` pass | `zig build test-run-pass` |
 | **A5** Aggregates + references | structs, tuples, enums (niche + tagged, `Discriminant`, `SetDiscriminant`), arrays/slices, `Ref`/`RawPtr`, `Len`, `Aggregate`, `Drop` via `drop_in_place` instances, statics, const allocations with relocations, vtables + `dyn Trait` calls | Enum/trait-object tests pass | same + `tests/diff.sh` vs stock rustc output |
-| **A6** std hello world | Entry shim (`main` → `lang_start`), allocator shim, link against prebuilt std, `panic=abort` | `fn main(){ println!("hello") }` prints `hello` | `zig-out/bin/the-rust build tests/run-pass/hello.rs -C panic=abort && ./hello` |
+| **A6** std hello world | Entry shim (`main` → `lang_start`), allocator shim, link against prebuilt std, `panic=abort` | `fn main(){ println!("hello") }` prints `hello` | `zig-out/bin/zrust build tests/run-pass/hello.rs -C panic=abort && ./hello` |
 | **A7** Real-world semantics | Unwinding (`invoke`/`landingpad`, `rust_eh_personality`), remaining intrinsics, `Box`/`Vec`/`String`/`HashMap`, closures, generics-heavy code, debug info (DWARF line tables), `-O` pipelines | 90% of `tests/ui-subset.txt` (≈500 run-pass tests chosen from rustc `tests/ui`) | `tests/run_ui.sh` prints pass rate; CI fails on regression |
-| **A8** Crates + perf | `the-rust cargo build` on `serde`, `regex`, `ripgrep`; parallel CGU codegen; optional binary TRMIR; optional sysroot built with our backend (cg_clif-style) | ripgrep builds and passes its tests | `zig-out/bin/the-rust cargo test` in a ripgrep checkout |
+| **A8** Crates + perf | `zrust cargo build` on `serde`, `regex`, `ripgrep`; parallel CGU codegen; optional binary ZRMIR; optional sysroot built with our backend (cg_clif-style) | ripgrep builds and passes its tests | `zig-out/bin/zrust cargo test` in a ripgrep checkout |
 
-Optional mode (any time after A5): **Rust-to-Rust** printer — `the-rust build --emit=rust-mir` writes monomorphized MIR as compilable low-level Rust (one `unsafe fn` per instance, `goto` via `loop`/`match` state machine). Used for debugging and as a differential oracle (compile the printed Rust with stock rustc and compare outputs). Implemented in Zig from TRMIR, not in the shim.
+Optional mode (any time after A5): **Rust-to-Rust** printer — `zrust build --emit=rust-mir` writes monomorphized MIR as compilable low-level Rust (one `unsafe fn` per instance, `goto` via `loop`/`match` state machine). Used for debugging and as a differential oracle (compile the printed Rust with stock rustc and compare outputs). Implemented in Zig from ZRMIR, not in the shim.
 
 ## 10. Testing strategy
 - `tests/run-pass/*.rs` with `// expect-stdout:` headers; runner in Zig (`zig build test-run-pass`).
-- Differential: compile each test with stock rustc and with `the-rust`, compare exit code + stdout (`tests/diff.sh`). For UB-sensitive tests also run Miri (`cargo +nightly-2026-11-24 miri run`).
+- Differential: compile each test with stock rustc and with `zrust`, compare exit code + stdout (`tests/diff.sh`). For UB-sensitive tests also run Miri (`cargo +nightly-2026-11-24 miri run`).
 - rustc UI subset: list paths from https://github.com/rust-lang/rust/tree/master/tests/ui in `tests/ui-subset.txt`, only `//@ run-pass` tests; track pass rate in CI.
-- Every bug gets a minimized `.rs` + its `.trmir` in `tests/regressions/`.
+- Every bug gets a minimized `.rs` + its `.zrmir` in `tests/regressions/`.
 
 ## 11. Track B hook
-The Zig backend consumes only TRMIR. Track B (from-scratch frontend in Zig, see `docs/PLAN.md` §4) must produce TRMIR too, so the backend is shared and stays the single source of codegen truth.
+The Zig backend consumes only ZRMIR. Track B (from-scratch frontend in Zig, see `docs/PLAN.md` §4) must produce ZRMIR too, so the backend is shared and stays the single source of codegen truth.
 
 ## 12. Deliverables per PR
 Small PRs, one phase or sub-phase each. PR description: what changed, exit-criterion evidence (command + output), known gaps. Never merge yourself.
