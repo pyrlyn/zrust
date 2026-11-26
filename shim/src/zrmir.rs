@@ -6,7 +6,7 @@
 use serde::Serialize;
 
 pub const MAGIC: &str = "ZRMIR";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 pub type FileId = u32;
 pub type SpanId = u32;
@@ -45,8 +45,22 @@ pub struct Target {
     pub llvm_target: String,
     pub data_layout: String,
     pub cpu: String,
+    pub features: String,
+    pub relocation_model: RelocModel,
     pub pointer_width: u32,
     pub endian: Endian,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelocModel {
+    Static,
+    Pic,
+    Pie,
+    DynamicNoPic,
+    Ropi,
+    Rwpi,
+    RopiRwpi,
 }
 
 #[derive(Serialize)]
@@ -675,7 +689,7 @@ pub enum TerminatorKind {
     Call {
         func: Operand,
         callee: Callee,
-        abi: FnAbiId,
+        abi: Option<FnAbiId>,
         rust_call: bool,
         caller_location: Option<CallerLocation>,
         args: Vec<Operand>,
@@ -729,6 +743,7 @@ pub enum DropGlue {
 pub enum Callee {
     Direct { symbol: SymbolId },
     Intrinsic { name: String, fallback: Option<SymbolId> },
+    LlvmIntrinsic { name: String },
     Virtual { index: u64 },
     Indirect {},
 }

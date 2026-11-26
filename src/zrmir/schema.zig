@@ -4,7 +4,7 @@
 //! a tag is spelled exactly as in the file, and fields are declared in the order the file has them.
 
 pub const magic = "ZRMIR";
-pub const version = 1;
+pub const version = 2;
 
 /// What an id points into. `blocks` and `locals` belong to the body the id appears in, the rest to the module.
 pub const Table = enum { files, spans, types, layouts, fn_abis, allocs, symbols, blocks, locals };
@@ -57,10 +57,13 @@ pub const Target = struct {
     llvm_target: []const u8,
     data_layout: []const u8,
     cpu: []const u8,
+    features: []const u8,
+    relocation_model: RelocModel,
     pointer_width: u32,
     endian: Endian,
 };
 
+pub const RelocModel = enum { static, pic, pie, dynamic_no_pic, ropi, rwpi, ropi_rwpi };
 pub const Endian = enum { little, big };
 pub const PanicStrategy = enum { unwind, abort, immediate_abort };
 pub const OptLevel = enum { none, less, more, aggressive, size, size_min };
@@ -503,7 +506,7 @@ pub const TerminatorKind = union(enum) {
     call: struct {
         func: Operand,
         callee: Callee,
-        abi: FnAbiId,
+        abi: ?FnAbiId,
         rust_call: bool,
         caller_location: ?CallerLocation,
         args: []const Operand,
@@ -550,6 +553,7 @@ pub const DropGlue = union(enum) {
 pub const Callee = union(enum) {
     direct: struct { symbol: SymbolId },
     intrinsic: struct { name: []const u8, fallback: ?SymbolId },
+    llvm_intrinsic: struct { name: []const u8 },
     virtual: struct { index: u64 },
     indirect,
 };

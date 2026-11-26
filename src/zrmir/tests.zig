@@ -5,9 +5,9 @@ const zrmir = @import("../zrmir.zig");
 
 /// The smallest module with one of everything a reference can point at: `fn f() {}`.
 const minimal =
-    \\{"magic":"ZRMIR","version":1,"crate_name":"t","cgu_name":"t.0",
+    \\{"magic":"ZRMIR","version":2,"crate_name":"t","cgu_name":"t.0",
 ++
-    \\"target":{"triple":"aarch64-apple-darwin","llvm_target":"arm64-apple-macosx11.0.0","data_layout":"e","cpu":"generic","pointer_width":64,"endian":"little"},
+    \\"target":{"triple":"aarch64-apple-darwin","llvm_target":"arm64-apple-macosx11.0.0","data_layout":"e","cpu":"generic","features":"","relocation_model":"pic","pointer_width":64,"endian":"little"},
 ++
     \\"panic_strategy":"abort","opt_level":"none","files":["t.rs"],
 ++
@@ -62,7 +62,7 @@ test "a minimal module passes" {
 
 test "another format or version is named as such" {
     try expectRejected("\"magic\":\"ZRMIR\"", "\"magic\":\"ELF\"", "not a ZRMIR module: the magic is \"ELF\"");
-    try expectRejected("\"version\":1", "\"version\":2", "ZRMIR version 2 is not supported");
+    try expectRejected("\"version\":2", "\"version\":1", "ZRMIR version 1 is not supported");
     try expectRejected("{\"magic\"", "[{\"magic\"", "not a ZRMIR module");
 }
 
@@ -90,8 +90,35 @@ test "memory is checked" {
     try expectRejected("\"relocs\":[]", "\"relocs\":[{\"offset\":0,\"alloc\":0}]", "does not fit into 2 bytes");
 }
 
+test "layouts and constants are checked" {
+    try expectRejected("\"align\":1,\"repr\"", "\"align\":3,\"repr\"", "an alignment of 3 bytes is not a power of two");
+    try expectRejected(
+        "\"statements\":[]",
+        "\"statements\":[{\"span\":0,\"kind\":{\"assume\":{\"constant\":{\"ty\":0,\"value\":{\"memory\":{\"bytes\":\"00\",\"relocs\":[]}}}}}}]",
+        "a constant of 1 bytes for a type of 0 bytes",
+    );
+}
+
+fn expectCallRejected(comptime callee: []const u8, comptime abi: []const u8, message: []const u8) !void {
+    try expectRejected(
+        "\"kind\":{\"return\":{}}",
+        "\"kind\":{\"call\":{\"func\":{\"constant\":{\"ty\":0,\"value\":{\"zero_sized\":{}}}},\"callee\":" ++ callee ++
+            ",\"abi\":" ++ abi ++ ",\"rust_call\":false,\"caller_location\":null,\"args\":[]," ++
+            "\"destination\":{\"local\":0,\"projection\":[]},\"target\":null,\"unwind\":{\"unreachable\":{}}}}",
+        message,
+    );
+}
+
+test "a call has an ABI unless LLVM defines it" {
+    const message = "a call has an `abi` exactly when it does not call an LLVM intrinsic";
+    try expectCallRejected("{\"llvm_intrinsic\":{\"name\":\"llvm.trap\"}}", "0", message);
+    try expectCallRejected("{\"indirect\":{}}", "null", message);
+    try expectCallRejected("{\"llvm_intrinsic\":{\"name\":\"trap\"}}", "null", "`trap` is not the name of an LLVM intrinsic");
+    try expectCallRejected("{\"direct\":{\"symbol\":4}}", "0", "id 4 is out of range");
+}
+
 test "only the canonical form is accepted" {
-    try expectRejected("\"version\":1", "\"version\": 1", "the file is not canonical");
+    try expectRejected("\"version\":2", "\"version\": 2", "the file is not canonical");
     try expectRejected("\"endian\":\"little\"", "\"endian\":0", "the file is not canonical");
     try expectRejected("\"arg_count\":0,\"spread_arg\":null", "\"spread_arg\":null,\"arg_count\":0", "the file is not canonical");
 }
