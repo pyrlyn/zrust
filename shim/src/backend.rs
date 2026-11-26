@@ -1,15 +1,27 @@
 use std::any::Any;
+use std::ffi::OsStr;
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use rustc_codegen_ssa::target_features::internal_target_features;
 use rustc_codegen_ssa::traits::CodegenBackend;
 use rustc_codegen_ssa::{CompiledModules, CrateInfo, TargetConfig};
+use rustc_metadata::EncodedMetadata;
 use rustc_middle::dep_graph::WorkProductMap;
 use rustc_middle::mono::MonoItemPartitions;
 use rustc_middle::ty::TyCtxt;
-use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_session::config::OutputFilenames;
 use rustc_session::{EarlySession, IncrCompSession, Session};
 use smallvec::{SmallVec, smallvec};
+
+use crate::{encode, zrmir};
+
+/// Path of the `zrust-codegen` executable; the `zrust` driver sets it.
+const CODEGEN_ENV: &str = "ZRUST_CODEGEN";
+/// When set, the ZRMIR files outlive the compilation.
+const KEEP_ENV: &str = "ZRUST_KEEP_ZRMIR";
 
 pub struct ZrustBackend;
 
@@ -57,36 +69,84 @@ impl CodegenBackend for ZrustBackend {
 
     fn codegen_crate<'tcx>(&self, tcx: TyCtxt<'tcx>) -> Box<dyn Any> {
         let MonoItemPartitions { codegen_units, .. } = tcx.collect_and_partition_mono_items(());
+        let outputs = tcx.output_filenames(());
+        let cpu = self.target_cpu(tcx.sess);
 
-        for cgu in codegen_units {
-            let items = cgu.items_in_deterministic_order(tcx);
-            eprintln!("zrust: cgu {} ({} items)", cgu.name(), items.len());
-            for (item, data) in &items {
-                // Trimmed paths drop the modules (`lang_start` for `std::rt::lang_start`); the log
-                // has to name items unambiguously.
-                let path = with_no_trimmed_paths!(item.to_string());
-                eprintln!(
-                    "zrust:   {path} [{}, {:?}, {:?}]",
-                    item.symbol_name(tcx),
-                    data.linkage,
-                    data.visibility,
-                );
+        // One `run` for the whole crate: rustc_public's handles are only valid inside it.
+        let encoded = rustc_public::rustc_internal::run(tcx, || {
+            let mut files = Vec::with_capacity(codegen_units.len());
+            for cgu in codegen_units {
+                let path = outputs.temp_path_ext_for_cgu("zrmir", cgu.name().as_str());
+                let module = encode::encode_cgu(tcx, cgu, cpu.clone());
+                if let Err(error) = write_module(&path, &module) {
+                    tcx.dcx().fatal(format!("zrust: cannot write {}: {error}", path.display()));
+                }
+                files.push(path);
             }
+            files
+        });
+        let files = encoded.unwrap_or_else(|error| tcx.dcx().fatal(format!("zrust: {error}")));
+
+        if let Some(codegen) = std::env::var_os(CODEGEN_ENV) {
+            check_modules(tcx, &codegen, &files);
         }
 
+        if std::env::var_os(KEEP_ENV).is_some_and(|value| !value.is_empty()) {
+            // Dumping ZRMIR was the point of this run, so it succeeds, but says that it produced nothing else.
+            let mut warning =
+                tcx.dcx().struct_warn("zrust: code generation is not implemented yet, nothing is compiled or linked");
+            for file in &files {
+                warning.note(format!("wrote {}", file.display()));
+            }
+            warning.emit();
+            return Box::new(());
+        }
+
+        for file in &files {
+            // A leftover file is harmless, and the error below is the one worth reporting.
+            let _ = std::fs::remove_file(file);
+        }
         tcx.dcx().fatal("zrust: code generation is not implemented yet")
     }
 
     fn join_codegen(
         &self,
         _ongoing_codegen: Box<dyn Any>,
-        sess: &Session,
+        _sess: &Session,
         _incr_comp_session: Option<&IncrCompSession>,
         _outputs: &OutputFilenames,
         _crate_info: &CrateInfo,
     ) -> (CompiledModules, WorkProductMap) {
-        // `codegen_crate` never returns, so rustc cannot get here; a diagnostic beats a panic if
-        // that changes.
-        sess.dcx().fatal("zrust: code generation is not implemented yet")
+        (CompiledModules { modules: Vec::new(), allocator_module: None }, WorkProductMap::default())
+    }
+
+    fn link(
+        &self,
+        _sess: &Session,
+        _compiled_modules: CompiledModules,
+        _crate_info: CrateInfo,
+        _metadata: EncodedMetadata,
+        _outputs: &OutputFilenames,
+    ) {
+        // rustc only gets here on a ZRMIR dump (see `codegen_crate`), and no object files exist to link.
+    }
+}
+
+fn write_module(path: &Path, module: &zrmir::Module) -> std::io::Result<()> {
+    let mut file = BufWriter::new(File::create(path)?);
+    serde_json::to_writer(&mut file, module)?;
+    file.flush()
+}
+
+/// Has `zrust-codegen` read back every file, so a mismatch between the encoder and the decoder fails the build that
+/// produced it.
+fn check_modules(tcx: TyCtxt<'_>, codegen: &OsStr, files: &[PathBuf]) {
+    let output = match Command::new(codegen).arg("--check").arg("--in").args(files).output() {
+        Ok(output) => output,
+        Err(error) => tcx.dcx().fatal(format!("zrust: cannot run {}: {error}", codegen.display())),
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tcx.dcx().fatal(format!("zrust: {} rejected the ZRMIR ({}):\n{}", codegen.display(), output.status, stderr.trim_end()));
     }
 }
