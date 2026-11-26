@@ -2,5 +2,5 @@
 zig-cache/
 zig-out/
 target/
-*.trmir
+*.zrmir
 .DS_Store

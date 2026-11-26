@@ -1,12 +1,12 @@
-# The Rust
+# ZRust
 
-**The Rust** is an experimental Rust compiler written in **Zig** with an **LLVM** backend.
+**ZRust** is an experimental Rust compiler written in **Zig** with an **LLVM** backend.
 
 - **Status:** planning — no code yet. This README contains the full plan; the same text lives in [`docs/PLAN.md`](docs/PLAN.md).
 - **Recommended path:** reuse the existing `rustc` frontend through `rustc_private` / `rustc_public` and write the backend (MIR → LLVM IR → object) and the driver in Zig. Step-by-step instructions for an implementing agent: [`docs/AGENT_PROMPT.md`](docs/AGENT_PROMPT.md).
 - **Alternative path:** a from-scratch frontend in Zig, sharing the same backend.
 
-> **Disclaimer.** This is an unofficial, independent project. It is **not affiliated with, endorsed by, or sponsored by the Rust Project or the Rust Foundation**. "Rust" and the Rust logo are trademarks of the Rust Foundation ([policy](https://rustfoundation.org/policy/rust-trademark-policy/)). The project name is provisional.
+> **Disclaimer.** This is an unofficial, independent project. It is **not affiliated with, endorsed by, or sponsored by the official Rust project or Rust Foundation**. "Rust" and its logo are trademarks of Rust Foundation ([policy](https://rustfoundation.org/policy/rust-trademark-policy/)). The name "ZRust" still contains "Rust", so Rust Foundation's trademark policy may still apply to it; it is less risky than the earlier working name, and remains provisional.
 
 License: not chosen yet.
 
@@ -46,10 +46,10 @@ Track A is the recommended path. Track B stays documented as the long-term optio
 - **Pin LLVM 22** — the version Zig 0.17.1 builds against (`find_package(llvm 22)` in Zig's `CMakeLists.txt`). Keep one LLVM for the whole Zig side.
 - [New pass manager](https://llvm.org/docs/NewPassManager.html), [passes](https://llvm.org/docs/Passes.html), [source-level debugging](https://llvm.org/docs/SourceLevelDebugging.html), [LTO](https://llvm.org/docs/LinkTimeOptimization.html), [LLD](https://lld.llvm.org/).
 
-### 1.3 The Rust language
-- [The Rust Reference](https://doc.rust-lang.org/reference/).
+### 1.3 ZRust language
+- [ZRust Reference](https://doc.rust-lang.org/reference/).
 - [Ferrocene Language Specification (FLS)](https://spec.ferrocene.dev/) ([source](https://github.com/ferrocene/specification)) — the most precise written spec; use its paragraph IDs in test names.
-- [The Rustonomicon](https://doc.rust-lang.org/nomicon/) for unsafe, layout, drop, unwinding.
+- [ZRustonomicon](https://doc.rust-lang.org/nomicon/) for unsafe, layout, drop, unwinding.
 
 ### 1.4 Compiler architecture
 - Pipeline vs **query-based/incremental** compilation ([rustc query system](https://rustc-dev-guide.rust-lang.org/query.html)).
@@ -101,15 +101,15 @@ New pass manager and `default<O0..O3>` pipelines via `LLVMRunPasses`; target tri
 Summary (full instructions in [`docs/AGENT_PROMPT.md`](docs/AGENT_PROMPT.md)):
 
 ```
-the-rust (Zig CLI)
-  └─ exec: rustc +nightly-2026-11-24 -Zcodegen-backend=libthe_rust_shim.{so,dylib} ...
+zrust (Zig CLI)
+  └─ exec: rustc +nightly-2026-11-24 -Zcodegen-backend=libzrust_shim.{so,dylib} ...
         rustc frontend: parse → expand → resolve → HIR → typeck → THIR → MIR → borrowck → mono collection   (REUSED)
-        shim (Rust, CodegenBackend): read MIR via rustc_public, write .trmir per CGU                         (THIN)
-          └─ spawn: the-rust-codegen (Zig): .trmir → LLVM IR → optimize → .o                                  (NEW, Zig)
+        shim (Rust, CodegenBackend): read MIR via rustc_public, write .zrmir per CGU                         (THIN)
+          └─ spawn: zrust-codegen (Zig): .zrmir → LLVM IR → optimize → .o                                  (NEW, Zig)
         rustc_codegen_ssa::back::link::link_binary → system linker / lld                                     (REUSED)
 ```
 
-Phases A0–A8: toolchain pin and skeleton → shim that delegates (no-op) → TRMIR schema and dump → Zig codegen for `fn main` returning constants → scalars, control flow, calls → aggregates, references, enums, drops → std linking (`println!` works) → unwinding, intrinsics, debug info → run rustc `tests/ui` run-pass subset and real crates. Optional output mode: **Rust-to-Rust** (`--emit=rust-mir`) — pretty-print monomorphized MIR as compilable low-level Rust, used for debugging and differential tests.
+Phases A0–A8: toolchain pin and skeleton → shim that delegates (no-op) → ZRMIR schema and dump → Zig codegen for `fn main` returning constants → scalars, control flow, calls → aggregates, references, enums, drops → std linking (`println!` works) → unwinding, intrinsics, debug info → run rustc `tests/ui` run-pass subset and real crates. Optional output mode: **Rust-to-Rust** (`--emit=rust-mir`) — pretty-print monomorphized MIR as compilable low-level Rust, used for debugging and differential tests.
 
 ## 4. Track B — From scratch in Zig (alternative)
 
@@ -142,14 +142,14 @@ Integers/bool/char, structs/enums/tuples, `match`, `if/loop/while/for` over rang
 ```
 build.zig / build.zig.zon
 src/
-  main.zig            # the-rust CLI driver (Track A: wraps rustc; Track B: full pipeline)
+  main.zig            # zrust CLI driver (Track A: wraps rustc; Track B: full pipeline)
   driver/             # argument parsing, sysroot/toolchain discovery, cargo integration
-  trmir/              # TRMIR schema + decoder (Track A input)
+  zrmir/              # ZRMIR schema + decoder (Track A input)
   codegen/            # MIR → LLVM IR (shared): types.zig, place.zig, rvalue.zig, terminator.zig, intrinsics.zig, abi.zig, debuginfo.zig
   llvm/               # thin LLVM-C wrapper (bindings.zig), target machine, pass pipeline, object emission
   frontend/           # Track B only: lexer/, parser/, ast/, expand/, resolve/, hir/, typeck/, traits/, thir/, mir/, borrowck/, mono/
   util/               # arenas, interner, diagnostics, spans
-shim/                 # Track A only: Rust crate the_rust_shim (cdylib, rustc_private)
+shim/                 # Track A only: Rust crate zrust_shim (cdylib, rustc_private)
 tests/                # golden tests, ui subset runner, differential harness
 docs/
 ```
@@ -157,9 +157,9 @@ docs/
 ## 5. Risks and scope
 - **Rust is huge.** Track B to full Rust is a multi-year effort (mrustc took years and skips borrowck). Hence Track A first.
 - **rustc_private is unstable.** APIs change every nightly. Mitigation: pin one nightly in `rust-toolchain.toml`, keep the shim tiny, read MIR through `rustc_public` where possible, bump the nightly on a schedule with a checklist.
-- **Two LLVMs in one process.** `librustc_driver` statically contains rustc's LLVM; loading a second libLLVM into the same process can clash. Mitigation: the Zig codegen runs **out of process** (`the-rust-codegen` executable) and talks to the shim through `.trmir` files.
-- **ABI correctness.** Use rustc's computed layouts and `FnAbi` (exported into TRMIR) instead of reimplementing them, so objects link with the prebuilt std.
-- **Naming/trademark.** "Rust" is a Rust Foundation trademark; "The Rust" as a project name likely conflicts with its policy. Rename before any public release.
+- **Two LLVMs in one process.** `librustc_driver` statically contains rustc's LLVM; loading a second libLLVM into the same process can clash. Mitigation: the Zig codegen runs **out of process** (`zrust-codegen` executable) and talks to the shim through `.zrmir` files.
+- **ABI correctness.** Use rustc's computed layouts and `FnAbi` (exported into ZRMIR) instead of reimplementing them, so objects link with the prebuilt std.
+- **Naming/trademark.** "Rust" is a Rust Foundation trademark; "ZRust" is less risky than the earlier working name but still contains "Rust", so the [Rust Foundation trademark policy](https://rustfoundation.org/policy/rust-trademark-policy/) may still apply. Review the name before any public release.
 - **License** not chosen yet.
 
 ## 6. References
