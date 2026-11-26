@@ -2,7 +2,6 @@
 
 Approved work that is not in `plan/` yet. Phases and their exit criteria are defined in [`docs/AGENT_PROMPT.md`](docs/AGENT_PROMPT.md) §9.
 
-- **Phase A2 — ZRMIR dump.** Encoder for types, layouts, `FnAbi`, bodies and allocations; `docs/ZRMIR.md`; a strict Zig decoder.
 - **Phase A3 — first code.** A `no_std`/`no_main` program returning 42: integer constants, locals, `Assign`, `Return`.
 - **Phase A4 — control flow and calls.** `Goto`, `SwitchInt`, `Call`, `Assert`, checked arithmetic, casts, function pointers.
 - **Phase A5 — aggregates and references.** Structs, tuples, enums, arrays and slices, references, drops, statics, constant allocations, vtables and `dyn Trait`.
