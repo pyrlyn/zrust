@@ -55,6 +55,16 @@ pub fn build(b: *std.Build) void {
     const shim = installShim(b);
 
     const test_step = b.step("test", "Run the tests");
+
+    const zrmir_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/zrmir.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(zrmir_tests).step);
+
     test_step.dependOn(addShimTest(b, shim));
 }
 
