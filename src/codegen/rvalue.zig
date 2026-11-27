@@ -149,7 +149,8 @@ pub fn unary(l: *const Lowering, op: schema.UnOp, operand: Value) codegen.Error!
             .float => llvm.LLVMBuildFNeg(l.builder, operand.value, ""),
             else => return l.malformed("`neg` on a value that is not a number", .{}),
         },
-        .ptr_metadata => return l.unsupported("the operator `ptr_metadata`", .{}),
+        // Its operand may be a wide pointer, which is no scalar: `function.zig` lowers it.
+        .ptr_metadata => unreachable,
     });
 }
 

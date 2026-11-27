@@ -8,6 +8,7 @@ const zrmir = @import("../zrmir.zig");
 const schema = zrmir.schema;
 const abi = @import("abi.zig");
 const function = @import("function.zig");
+const globals = @import("globals.zig");
 
 /// What every part of the lowering needs: the module being read and the one being built.
 pub const Lowering = struct {
@@ -17,6 +18,8 @@ pub const Lowering = struct {
     module: llvm.LLVMModuleRef,
     builder: llvm.LLVMBuilderRef,
     diagnostic: *zrmir.Diagnostic,
+    /// By allocation: the global of memory without a name, once something has pointed at it.
+    allocs: []llvm.LLVMValueRef,
 
     /// Refuses what the code generator cannot compile yet. That is the only alternative to compiling it correctly:
     /// nothing is skipped or approximated.
@@ -88,6 +91,8 @@ pub fn lowerModule(
 
     const builder = llvm.LLVMCreateBuilderInContext(context);
     defer llvm.LLVMDisposeBuilder(builder);
+    const allocs = try arena.alloc(llvm.LLVMValueRef, source.allocs.len);
+    @memset(allocs, null);
     const lowering: Lowering = .{
         .arena = arena,
         .source = source,
@@ -95,15 +100,14 @@ pub fn lowerModule(
         .module = module,
         .builder = builder,
         .diagnostic = diagnostic,
+        .allocs = allocs,
     };
 
-    if (source.statics.len != 0) {
-        const name = source.symbols[source.statics[0].symbol.index()].name;
-        return lowering.unsupported("a static (`{s}`)", .{name});
-    }
-    // Declared before any body is lowered, so that a call finds its callee with the linkage of the definition
-    // whichever of the two comes first in the module.
-    for (source.functions) |*item| abi.define(try lowering.functionOf(item.symbol), item);
+    // Declared before anything mentions them, so that a call or a pointer finds its target with the linkage of the
+    // definition whichever of the two comes first in the module.
+    for (source.statics) |*item| try globals.declare(&lowering, item);
+    for (source.functions) |*item| define(try lowering.functionOf(item.symbol), item.linkage, item.visibility);
+    for (source.statics) |*item| try globals.initialize(&lowering, item);
     for (source.functions) |*item| {
         const symbol = &source.symbols[item.symbol.index()];
         // The validator has checked that the symbol of a function is one.
@@ -111,4 +115,23 @@ pub fn lowerModule(
         try function.lower(&lowering, item, symbol.name, fn_abi, try lowering.functionOf(item.symbol));
     }
     return module;
+}
+
+/// Gives a declared function or static what only its definition knows.
+pub fn define(value: llvm.LLVMValueRef, linkage: schema.Linkage, visibility: schema.Visibility) void {
+    llvm.LLVMSetLinkage(value, switch (linkage) {
+        .external => llvm.LLVMExternalLinkage,
+        .available_externally => llvm.LLVMAvailableExternallyLinkage,
+        .link_once_any => llvm.LLVMLinkOnceAnyLinkage,
+        .link_once_odr => llvm.LLVMLinkOnceODRLinkage,
+        .weak_any => llvm.LLVMWeakAnyLinkage,
+        .weak_odr => llvm.LLVMWeakODRLinkage,
+        .internal => llvm.LLVMInternalLinkage,
+        .external_weak => llvm.LLVMExternalWeakLinkage,
+    });
+    llvm.LLVMSetVisibility(value, switch (visibility) {
+        .default => llvm.LLVMDefaultVisibility,
+        .hidden => llvm.LLVMHiddenVisibility,
+        .protected => llvm.LLVMProtectedVisibility,
+    });
 }
