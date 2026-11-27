@@ -20,7 +20,7 @@ use rustc_public::ty::{self as pty, RigidTy, Ty, TyKind};
 use rustc_public::{CrateDef, CrateDefType};
 use rustc_public_bridge::IndexedVal;
 use rustc_session::config::{EntryFnType, OptLevel};
-use rustc_target::spec::PanicStrategy;
+use rustc_target::spec::{PanicStrategy, RelocModel};
 
 use crate::zrmir as z;
 
@@ -48,6 +48,16 @@ pub fn encode_cgu<'tcx>(tcx: TyCtxt<'tcx>, cgu: &CodegenUnit<'tcx>, cpu: String)
             llvm_target: rustc_codegen_ssa::back::versioned_llvm_target(sess).to_string(),
             data_layout: sess.target.data_layout.to_string(),
             cpu,
+            features: sess.target.features.to_string(),
+            relocation_model: match sess.relocation_model() {
+                RelocModel::Static => z::RelocModel::Static,
+                RelocModel::Pic => z::RelocModel::Pic,
+                RelocModel::Pie => z::RelocModel::Pie,
+                RelocModel::DynamicNoPic => z::RelocModel::DynamicNoPic,
+                RelocModel::Ropi => z::RelocModel::Ropi,
+                RelocModel::Rwpi => z::RelocModel::Rwpi,
+                RelocModel::RopiRwpi => z::RelocModel::RopiRwpi,
+            },
             pointer_width: sess.target.pointer_width.into(),
             endian: match MachineInfo::target_endianness() {
                 Endian::Little => z::Endian::Little,
@@ -858,9 +868,8 @@ impl<'tcx> Encoder<'tcx> {
         let callee = match instance {
             None => z::Callee::Indirect {},
             Some(instance) => match instance.kind {
-                InstanceKind::Item | InstanceKind::Shim | InstanceKind::LlvmIntrinsic => {
-                    z::Callee::Direct { symbol: self.fn_symbol(instance) }
-                }
+                InstanceKind::Item | InstanceKind::Shim => z::Callee::Direct { symbol: self.fn_symbol(instance) },
+                InstanceKind::LlvmIntrinsic => z::Callee::LlvmIntrinsic { name: self.llvm_intrinsic_name(instance) },
                 InstanceKind::Intrinsic => z::Callee::Intrinsic {
                     name: instance.intrinsic_name().expect("an intrinsic instance has an intrinsic name"),
                     fallback: instance.has_body().then(|| self.fn_symbol(instance)),
@@ -872,16 +881,31 @@ impl<'tcx> Encoder<'tcx> {
             .is_some_and(|instance| instance.requires_caller_location())
             .then(|| self.caller_location(cx, terminator));
 
+        // An LLVM intrinsic has no Rust ABI: rustc refuses to compute one, LLVM alone says how it is called.
+        let abi = match callee {
+            z::Callee::LlvmIntrinsic { .. } => None,
+            _ => Some(self.call_abi(cx, instance, func_ty, &sig, args)),
+        };
+
         z::TerminatorKind::Call {
             func: self.operand(func),
             callee,
-            abi: self.call_abi(cx, instance, func_ty, &sig, args),
+            abi,
             rust_call: matches!(sig.value.abi, pty::Abi::RustCall),
             caller_location,
             args: args.iter().map(|arg| self.operand(arg)).collect(),
             destination: self.place(destination),
             target: target.map(|block| block as u32),
             unwind: unwind_action(unwind),
+        }
+    }
+
+    fn llvm_intrinsic_name(&mut self, instance: Instance) -> String {
+        // rustc_public has no accessor for the link name; the stock backends read it from the same attribute.
+        let def = internal(self.tcx, instance).def_id();
+        match self.tcx.codegen_fn_attrs(def).symbol_name {
+            Some(name) => name.to_string(),
+            None => self.unsupported("an LLVM intrinsic without a link name"),
         }
     }
 

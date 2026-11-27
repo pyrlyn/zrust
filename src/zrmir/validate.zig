@@ -29,6 +29,9 @@ const Validator = struct {
     /// Deeper than the schema nests; the schema has no recursive types.
     const max_depth = 32;
 
+    /// The largest alignment rustc gives a type.
+    const max_align = 1 << 29;
+
     const Segment = union(enum) { field: []const u8, index: usize };
 
     fn fail(v: *Validator, comptime format: []const u8, args: anytype) Diagnostic.Error {
@@ -71,6 +74,15 @@ const Validator = struct {
                 return v.walkParts(T, value);
             },
             schema.Memory => try v.memory(value),
+            schema.Layout => try v.layout(value),
+            schema.Primitive => switch (value.*) {
+                .int => |int| switch (int.bits) {
+                    8, 16, 32, 64, 128 => {},
+                    else => |bits| return v.fail("an integer of {d} bits is not supported", .{bits}),
+                },
+                .bool, .float, .pointer => {},
+            },
+            schema.Const => try v.constant(value),
             schema.Function => try v.symbol(value.symbol, .@"fn"),
             schema.Static => try v.symbol(value.symbol, .static),
             schema.Entry => try v.symbol(value.main, .@"fn"),
@@ -88,7 +100,16 @@ const Validator = struct {
             schema.Callee => switch (value.*) {
                 .direct => |direct| try v.symbol(direct.symbol, .@"fn"),
                 .intrinsic => |intrinsic| if (intrinsic.fallback) |fallback| try v.symbol(fallback, .@"fn"),
+                .llvm_intrinsic => |intrinsic| if (!std.mem.startsWith(u8, intrinsic.name, "llvm.")) {
+                    return v.fail("`{s}` is not the name of an LLVM intrinsic", .{intrinsic.name});
+                },
                 .virtual, .indirect => {},
+            },
+            schema.TerminatorKind => switch (value.*) {
+                .call => |call| if ((call.callee == .llvm_intrinsic) != (call.abi == null)) {
+                    return v.fail("a call has an `abi` exactly when it does not call an LLVM intrinsic", .{});
+                },
+                else => {},
             },
             else => {},
         }
@@ -147,6 +168,46 @@ const Validator = struct {
         const found = std.meta.activeTag(v.module.symbols[id.index()].kind);
         if (found != kind) {
             return v.fail("symbol {d} is a `{s}` where a `{s}` belongs", .{ id.index(), @tagName(found), @tagName(kind) });
+        }
+    }
+
+    fn layout(v: *Validator, value: *const schema.Layout) Diagnostic.Error!void {
+        if (!std.math.isPowerOfTwo(value.@"align") or value.@"align" > max_align) {
+            return v.fail("an alignment of {d} bytes is not a power of two up to {d}", .{ value.@"align", max_align });
+        }
+        const scalar = switch (value.repr) {
+            .scalar => |repr| repr.scalar,
+            .scalar_pair, .vector, .aggregate => return,
+        };
+        // The code generator reads and writes a scalar as an LLVM value of its kind, which must not reach past the
+        // layout. An x87 float is padded to a size that depends on the target, so it is left alone.
+        const size: u64 = switch (scalar.primitive) {
+            .bool => 1,
+            .int => |int| int.bits / 8,
+            .float => |float| switch (float.format) {
+                .f16, .f16b => 2,
+                .f32 => 4,
+                .f64 => 8,
+                .f128, .ppc_f128 => 16,
+                .x87_f80 => return,
+            },
+            .pointer => v.module.target.pointer_width / 8,
+        };
+        if (size != value.size) return v.fail("a scalar of {d} bytes in a layout of {d} bytes", .{ size, value.size });
+    }
+
+    /// The bytes of a constant are the whole value: the code generator reads them by the layout of the type.
+    fn constant(v: *Validator, value: *const schema.Const) Diagnostic.Error!void {
+        const bytes = switch (value.value) {
+            .zero_sized => return,
+            .memory => |memory_value| memory_value.bytes,
+        };
+        // The tables come before every constant in a module, so they are checked by now; the constant's own id is not.
+        try v.reference(.types, value.ty.index());
+        const id = v.module.types[value.ty.index()].layout orelse return;
+        const size = v.module.layouts[id.index()].size;
+        if (bytes.len / 2 != size) {
+            return v.fail("a constant of {d} bytes for a type of {d} bytes", .{ bytes.len / 2, size });
         }
     }
 

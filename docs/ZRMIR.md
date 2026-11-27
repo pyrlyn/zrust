@@ -2,7 +2,7 @@
 
 ZRMIR is the interchange format between the two halves of ZRust: the Rust shim (`shim/`), which runs inside rustc, writes it, and `zrust-codegen`, the Zig backend, reads it. It carries everything rustc knows that code generation needs — monomorphic MIR bodies, types, layouts, function ABIs, constants and global memory — so that the Zig side never has to ask rustc anything.
 
-This document specifies **version 1**. The data model is declared twice, and both declarations follow this document:
+This document specifies **version 2**. The data model is declared twice, and both declarations follow this document:
 
 - `shim/src/zrmir.rs` — the writing side (serde types);
 - `src/zrmir/schema.zig` — the reading side (`std.json` types).
@@ -21,7 +21,7 @@ A file is self-contained: its tables are not shared with the other units of the 
 
 ### 1.1 Encoding
 
-Version 1 is JSON (UTF-8). A binary encoding may replace it later under a new version number.
+Version 2 is JSON (UTF-8). A binary encoding may replace it later under a new version number.
 
 A file is in **canonical form**:
 
@@ -57,7 +57,7 @@ The top-level object.
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `magic` | string | Always `"ZRMIR"`. |
-| `version` | u32 | Always `1` for this document. |
+| `version` | u32 | Always `2` for this document. |
 | `crate_name` | string | The crate being compiled. |
 | `cgu_name` | string | rustc's name of the codegen unit. |
 | `target` | Target | What code is generated for. |
@@ -84,6 +84,8 @@ The top-level object.
 | `llvm_target` | string | The LLVM triple, with the deployment target where there is one: `arm64-apple-macosx11.0.0`. |
 | `data_layout` | string | The LLVM data layout string of the target. |
 | `cpu` | string | `-Ctarget-cpu`, or the target's default CPU. |
+| `features` | string | The target's own LLVM feature string, such as `+v7,+thumb2`; empty on most targets. `-Ctarget-feature` is not in it (§9). |
+| `relocation_model` | `static \| pic \| pie \| dynamic_no_pic \| ropi \| rwpi \| ropi_rwpi` | `-Crelocation-model`, or the target's default. |
 | `pointer_width` | u32 | Bits: 16, 32 or 64. |
 | `endian` | `little \| big` | |
 
@@ -417,7 +419,7 @@ The payload of `call`:
 | --- | --- | --- |
 | `func` | Operand | The callee as a value: a zero-sized constant of a `fn_def` type, or a function pointer. |
 | `callee` | Callee | What the shim resolved `func` to. |
-| `abi` | FnAbiId | The ABI of this call. |
+| `abi` | FnAbiId? | The ABI of this call; `null` exactly when `callee` is `llvm_intrinsic`. |
 | `rust_call` | bool | The last argument is a tuple whose fields are passed one by one. |
 | `caller_location` | CallerLocation? | Set when the callee takes a caller location (§4): what to pass as that hidden last argument. |
 | `args` | [Operand] | |
@@ -431,10 +433,11 @@ The payload of `call`:
 | --- | --- | --- |
 | `direct` | `symbol`: SymbolId | Call this function. |
 | `intrinsic` | `name`: string, `fallback`: SymbolId? | A compiler intrinsic. A code generator that does not implement it calls `fallback`; without one the intrinsic has to be implemented. |
+| `llvm_intrinsic` | `name`: string | An LLVM intrinsic, declared in Rust as an `extern "llvm-intrinsic"` item: `name` is what LLVM calls it, `llvm.aarch64.neon.umaxp.v16i8`. It is no symbol and has no Rust ABI: the arguments and the result are passed as LLVM values, the way LLVM declares the intrinsic. |
 | `virtual` | `index`: u64 | A `dyn Trait` method: the function pointer is entry `index` of the receiver's vtable, counting pointer-sized entries from the start of the vtable. `abi` already takes the receiver as a thin data pointer. |
 | `indirect` | — | Call the function pointer in `func`. |
 
-`abi` equals the ABI of the callee's symbol except for a C-variadic call that passes more than the fixed arguments, where the extra arguments are classified for this call alone.
+Where there is one, `abi` equals the ABI of the callee's symbol except for a C-variadic call that passes more than the fixed arguments, where the extra arguments are classified for this call alone.
 
 **CallerLocation** — the `&'static core::panic::Location` a call or an assertion reports.
 
@@ -443,13 +446,14 @@ The payload of `call`:
 | `inherited` | — | The location the enclosing function itself received; only inside a function with `track_caller`. |
 | `const` | Const | A constant location. |
 
-## 8. Reading: `zrust-codegen --check`
+## 8. Reading: `zrust-codegen`
 
 ```
 zrust-codegen --check --in <file.zrmir>...
+zrust-codegen --in <file.zrmir> --out <file> [--emit=obj|llvm-ir]
 ```
 
-reads every file and exits with `0` when all pass, printing one line per file (`ok <path>: <n> functions, <n> statics, <n> types, <n> allocs`), and with `1` after `zrust-codegen: <path>: <message>` on stderr for each file that does not. A file passes three checks:
+The first form reads every file and exits with `0` when all pass, printing one line per file (`ok <path>: <n> functions, <n> statics, <n> types, <n> allocs`), and with `1` after `zrust-codegen: <path>: <message>` on stderr for each file that does not. A file passes three checks:
 
 1. **Decoding.** `magic` and `version` are checked first, so a file of another version is reported as such. Then the file is parsed strictly: an unknown or duplicate field, a missing field, an unknown tag or enum value, a value of the wrong shape or a number that does not fit its type is an error with the line, the column, the byte offset and the text around it.
 2. **Validation**, for what the shape of the data cannot express. The error names the path of the value (`functions[0].body.locals[0].ty: id 7 is out of range: ...`).
@@ -459,25 +463,38 @@ reads every file and exits with `0` when all pass, printing one line per file (`
    - A body has at least one block and more locals than arguments.
    - `bytes` is an even number of characters, each pair hex or `__`, and every relocation leaves room for a pointer.
    - `pointer_width` is 16, 32 or 64.
+   - A layout's alignment is a power of two of at most 2^29 bytes. A layout with a `scalar` representation is as large as its scalar, and an integer scalar has 8, 16, 32, 64 or 128 bits.
+   - A `memory` constant has as many bytes as the layout of its type, when the type has one.
+   - A call has an `abi` exactly when its callee is not `llvm_intrinsic`, and the name of an LLVM intrinsic starts with `llvm.`.
 3. **Canonical form.** The decoded module is encoded again and compared with the file byte for byte. This also rejects what a lenient JSON parser lets through, and it proves that the Rust and the Zig declarations of the format describe the same thing for every value that occurs in the file.
+
+The second form compiles one module: after the same three checks it lowers the module to LLVM IR, has LLVM verify the result, runs the pass pipeline of the module's `opt_level` and writes an object file, or the textual IR with `--emit=llvm-ir`. The target, the CPU, the features, the relocation model and the optimization level all come from the module; the command line names only files. A construct the code generator does not implement yet is an error that names the function, the block and the statement (`` `main`, bb0[3]: the rvalue `aggregate` is not supported yet ``) and no output is written; nothing is ever approximated.
 
 ## 9. Writing: the shim
 
-In phase A2 the shim does this for every compilation:
+For every compilation the shim encodes every codegen unit and writes the files. What follows depends on the environment:
 
-1. It encodes every codegen unit and writes the files.
-2. If the environment variable `ZRUST_CODEGEN` holds the path of `zrust-codegen` (the `zrust` driver sets it), it runs `zrust-codegen --check --in <files>` and fails the compilation with that program's output when a file is rejected.
-3. If `ZRUST_KEEP_ZRMIR` is set and not empty, it keeps the files, lists them in a warning (`zrust: code generation is not implemented yet, nothing is compiled or linked`) and lets rustc finish successfully, without object files or a linked artifact. Otherwise it deletes the files and stops with the error `zrust: code generation is not implemented yet`.
+| Variable | Meaning |
+| --- | --- |
+| `ZRUST_CODEGEN` | The path of `zrust-codegen`. Required; the `zrust` driver sets it. |
+| `ZRUST_ZRMIR_ONLY` | Set and not empty: stop after the ZRMIR. |
+| `ZRUST_KEEP_ZRMIR` | Set and not empty: do not delete the files afterwards. |
 
-`zrust dump-zrmir <file.rs>` runs a compilation with `ZRUST_KEEP_ZRMIR=1`, writes into `target/zrmir/<file stem>/` and prints the paths of the files.
+- **A build.** The shim runs `zrust-codegen --in <unit>.zrmir --out <unit>.o` for one unit after another and hands the objects to rustc, which links them like those of its own backend. When a unit is refused the compilation fails with that program's output. The ZRMIR files are deleted in either case unless `ZRUST_KEEP_ZRMIR` is set.
+- **`ZRUST_ZRMIR_ONLY`.** The shim runs `zrust-codegen --check --in <files>`, keeps the files, lists them in a warning (`zrust: only ZRMIR was asked for, nothing is compiled or linked`) and lets rustc finish successfully without object files or a linked artifact. `zrust dump-zrmir <file.rs>` is this mode: it writes into `target/zrmir/<file stem>/` and prints the paths of the files.
 
-The shim stops with an error, prefixed `zrust:`, for what version 1 cannot express: `global_asm!`, scalable vector types, a constant or a type that reached code generation unevaluated.
+The shim stops with an error, prefixed `zrust:`, for what version 2 cannot express: `global_asm!`, scalable vector types, a constant or a type that reached code generation unevaluated, an LLVM intrinsic without a link name. It also refuses `-C target-feature`, which would have to change both `target.features` and the features of single functions.
 
 ## 10. Versioning and known gaps
 
 `version` grows by one with every change of the format, however small: a reader accepts exactly the version it was built for and nothing else. The shim and `zrust-codegen` are built and installed together, so no compatibility between versions is kept.
 
-What version 1 leaves out, and the phase (`docs/AGENT_PROMPT.md` §9) that needs it:
+Versions so far:
+
+- **1** (phase A2): the first one.
+- **2** (phase A3): `target.features` and `target.relocation_model`, which LLVM's target machine needs; the callee `llvm_intrinsic`, with a call's `abi` becoming optional for it. Version 1 wrote such a call as a `direct` one, which made rustc compute an ABI it does not define.
+
+What version 2 leaves out, and the phase (`docs/AGENT_PROMPT.md` §9) that needs it:
 
 - **Unsizing casts** (`unsize`) do not say what metadata the wide pointer gets: the array length or the vtable. A5.
 - **Assertions** do not name the panic functions to call. A4.
@@ -486,7 +503,7 @@ What version 1 leaves out, and the phase (`docs/AGENT_PROMPT.md` §9) that needs
 - **Debug info**: no variable names, source scopes or cleanup-block marks. A7.
 - **Function pointer types** carry no signature; the ABI of an indirect call is at the call site.
 - **`FnAbi`** has no "can unwind" flag.
-- **Function attributes** (inlining hints, `cold`, `naked`, target features, link sections, instruction sets) and static attributes (link section, `used`) are missing.
+- **Function attributes** (inlining hints, `cold`, `naked`, target features, link sections, instruction sets, whether a function can unwind, frame pointers and unwind tables) and static attributes (link section, `used`) are missing.
 - **Layouts** have no "uninhabited" flag.
 - **Inline assembly** is carried only as the strings `rustc_public` renders, which is not enough to generate code from.
 - **`global_asm!`** and **scalable vectors** are errors.

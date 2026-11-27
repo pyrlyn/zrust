@@ -2,6 +2,7 @@
 // expect-stdout: zrust
 // expect-stdout: 2
 // expect-stdout: 5
+// unsupported: needs phase A6 (`std`)
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU32, Ordering};

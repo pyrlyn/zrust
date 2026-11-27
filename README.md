@@ -2,7 +2,7 @@
 
 **ZRust** is an experimental Rust compiler written in **Zig** with an **LLVM** backend.
 
-- **Status:** phase A2 — rustc runs with ZRust as its code generator and every codegen unit is written out as [ZRMIR](docs/ZRMIR.md) and read back by the Zig side; no machine code is generated yet. This README contains the full plan; the same text lives in [`docs/PLAN.md`](docs/PLAN.md). Tasks are tracked in [`plan/`](plan/README.md).
+- **Status:** phase A3 — rustc runs with ZRust as its code generator: every codegen unit is written out as [ZRMIR](docs/ZRMIR.md), the Zig side turns it into an object file through LLVM, and rustc links the result. So far this covers only the smallest programs (integer constants, locals, `return`); everything else, `std` programs included, is refused with an error that names the construct. This README contains the full plan; the same text lives in [`docs/PLAN.md`](docs/PLAN.md). Tasks are tracked in [`plan/`](plan/README.md).
 - **Recommended path:** reuse the existing `rustc` frontend through `rustc_private` / `rustc_public` and write the backend (MIR → LLVM IR → object) and the driver in Zig. Step-by-step instructions for an implementing agent: [`docs/AGENT_PROMPT.md`](docs/AGENT_PROMPT.md).
 - **Alternative path:** a from-scratch frontend in Zig, sharing the same backend.
 
@@ -24,14 +24,30 @@ This produces `zig-out/bin/zrust`, `zig-out/bin/zrust-codegen` and `zig-out/lib/
 ## Usage
 
 ```sh
+zig-out/bin/zrust build tests/run-pass/exit42.rs -C panic=abort -C default-linker-libraries -o a.out
+./a.out; echo $?                                        # 42
 zig-out/bin/zrust dump-zrmir tests/run-pass/hello.rs    # write the ZRMIR of every codegen unit, print the paths
 zig-out/bin/zrust-codegen --check --in <file.zrmir>...  # decode and validate ZRMIR files
-zig-out/bin/zrust build tests/run-pass/hello.rs         # stops with "code generation is not implemented yet"
+zig-out/bin/zrust-codegen --in <file.zrmir> --out <file> [--emit=obj|llvm-ir]   # compile one ZRMIR module
 zig-out/bin/zrust rustc <rustc arguments>               # the pinned rustc with ZRust as its code generator
-zig build test                                          # unit tests, and the dump of tests/run-pass and of the shim
+zig build test                                          # everything below
+zig build test-run-pass                                 # build and run tests/run-pass with zrust and with stock rustc
 ```
 
 The driver finds the pinned nightly through `rustup run`.
+
+## Tests
+
+`zig build test` runs the unit tests, dumps the ZRMIR of every program in `tests/run-pass/` and of the shim crate, and runs `test-run-pass`. Each program in `tests/run-pass/` says in its first comment lines what it must do:
+
+| Directive | Meaning |
+| --- | --- |
+| `// expect-stdout: <line>` | One line of the expected output; repeat it for more lines. |
+| `// expect-exit: <code>` | The expected exit code; `0` when absent. |
+| `// rustc-flags: <flags>` | Extra arguments for both compilers. |
+| `// unsupported: <reason>` | ZRust cannot build the program yet: the test expects its "is not supported yet" error instead of a binary. |
+
+Stock rustc builds and runs every program too, so a header that is wrong about Rust fails on its own. ZRust builds each supported program twice, with and without `-O`.
 
 ---
 

@@ -4,6 +4,7 @@
 // expect-stdout: 340282366920938463463374607431768211455
 // expect-stdout: 16 3 1
 // expect-stdout: a 97
+// unsupported: needs phase A6 (`std`)
 
 #[inline(never)]
 fn opaque<T>(value: T) -> T {
