@@ -52,7 +52,10 @@ pub fn build(b: *std.Build) void {
     codegen.root_module.linkSystemLibrary("LLVM-" ++ llvm_major, .{ .use_pkg_config = .no });
     b.installArtifact(codegen);
 
-    installShim(b);
+    const shim = installShim(b);
+
+    const test_step = b.step("test", "Run the tests");
+    test_step.dependOn(addShimTest(b, shim));
 }
 
 const Llvm = struct {
@@ -78,21 +81,56 @@ fn trim(s: []const u8) []const u8 {
     return std.mem.trim(u8, s, " \t\r\n");
 }
 
+const Shim = struct {
+    /// The dylib inside cargo's target directory.
+    path: std.Build.LazyPath,
+    /// The cargo invocation that produces `path`.
+    build: *std.Build.Step,
+};
+
 /// Builds the rustc backend shim with cargo and copies it to `zig-out/lib`.
-fn installShim(b: *std.Build) void {
+fn installShim(b: *std.Build) Shim {
     // rustc loads the shim into its own process, so it is always built for the host, whatever `-Dtarget` says.
     const host = &b.graph.host.result;
     const file_name = b.fmt("{s}zrust_shim{s}", .{ host.libPrefix(), host.dynamicLibSuffix() });
 
-    const cargo = b.addSystemCommand(&.{ "cargo", "build", "--release", "--locked" });
-    // rustup picks the pinned nightly from rust-toolchain.toml by walking up from the working directory.
+    const cargo = addRustCommand(b, &.{ "cargo", "build", "--release", "--locked" });
     cargo.setCwd(b.path("shim"));
-    // An inherited RUSTUP_TOOLCHAIN (mise exports one for a globally configured rust) outranks rust-toolchain.toml.
-    cargo.removeEnvironmentVariable("RUSTUP_TOOLCHAIN");
-    // Cargo tracks its own inputs; a cached Run step would hide edits to the shim.
-    cargo.has_side_effects = true;
 
-    const install = b.addInstallLibFile(b.path(b.fmt("shim/target/release/{s}", .{file_name})), file_name);
+    const path = b.path(b.fmt("shim/target/release/{s}", .{file_name}));
+    const install = b.addInstallLibFile(path, file_name);
     install.step.dependOn(&cargo.step);
     b.getInstallStep().dependOn(&install.step);
+
+    return .{ .path = path, .build = &cargo.step };
+}
+
+/// Compiles `tests/run-pass/hello.rs` with the shim as rustc's backend. Until the backend generates
+/// code, a pass means: rustc loaded the shim, the shim listed the crate's mono items, then refused.
+fn addShimTest(b: *std.Build, shim: Shim) *std.Build.Step {
+    const rustc = addRustCommand(b, &.{"rustc"});
+    rustc.setCwd(b.path("."));
+    rustc.addPrefixedFileArg("-Zcodegen-backend=", shim.path);
+    rustc.addFileArg(b.path("tests/run-pass/hello.rs"));
+    rustc.addArg("--out-dir");
+    _ = rustc.addOutputDirectoryArg("hello");
+    rustc.step.dependOn(shim.build);
+
+    rustc.expectStdErrMatch("zrust: cgu hello.");
+    rustc.expectStdErrMatch("zrust:   fn main [");
+    rustc.expectStdErrMatch("error: zrust: code generation is not implemented yet");
+    rustc.expectExitCode(1);
+    return &rustc.step;
+}
+
+/// A command of the pinned Rust toolchain. Its working directory must be inside the repository:
+/// rustup picks the nightly from rust-toolchain.toml by walking up from there.
+fn addRustCommand(b: *std.Build, argv: []const []const u8) *std.Build.Step.Run {
+    const run = b.addSystemCommand(argv);
+    // An inherited RUSTUP_TOOLCHAIN (mise exports one for a globally configured rust) outranks rust-toolchain.toml.
+    run.removeEnvironmentVariable("RUSTUP_TOOLCHAIN");
+    // Neither cargo's nor rustc's real inputs (the shim sources, the sysroot) are visible to the build
+    // graph; a cached Run step would hide changes to them.
+    run.has_side_effects = true;
+    return run;
 }
