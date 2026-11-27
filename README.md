@@ -2,7 +2,7 @@
 
 **ZRust** is an experimental Rust compiler written in **Zig** with an **LLVM** backend.
 
-- **Status:** phase A0 — the build skeleton exists, nothing compiles Rust yet. This README contains the full plan; the same text lives in [`docs/PLAN.md`](docs/PLAN.md). Tasks are tracked in [`plan/`](plan/README.md).
+- **Status:** phase A2 — rustc runs with ZRust as its code generator and every codegen unit is written out as [ZRMIR](docs/ZRMIR.md) and read back by the Zig side; no machine code is generated yet. This README contains the full plan; the same text lives in [`docs/PLAN.md`](docs/PLAN.md). Tasks are tracked in [`plan/`](plan/README.md).
 - **Recommended path:** reuse the existing `rustc` frontend through `rustc_private` / `rustc_public` and write the backend (MIR → LLVM IR → object) and the driver in Zig. Step-by-step instructions for an implementing agent: [`docs/AGENT_PROMPT.md`](docs/AGENT_PROMPT.md).
 - **Alternative path:** a from-scratch frontend in Zig, sharing the same backend.
 
@@ -20,6 +20,18 @@ zig build       # rustup installs the pinned nightly (rust-toolchain.toml) on fi
 ```
 
 This produces `zig-out/bin/zrust`, `zig-out/bin/zrust-codegen` and `zig-out/lib/libzrust_shim.{dylib,so}`. To use another LLVM 22 install, pass `-Dllvm-config=<path to llvm-config>`. Tools and versions are listed in [`toolchain.md`](toolchain.md).
+
+## Usage
+
+```sh
+zig-out/bin/zrust dump-zrmir tests/run-pass/hello.rs    # write the ZRMIR of every codegen unit, print the paths
+zig-out/bin/zrust-codegen --check --in <file.zrmir>...  # decode and validate ZRMIR files
+zig-out/bin/zrust build tests/run-pass/hello.rs         # stops with "code generation is not implemented yet"
+zig-out/bin/zrust rustc <rustc arguments>               # the pinned rustc with ZRust as its code generator
+zig build test                                          # unit tests, and the dump of tests/run-pass and of the shim
+```
+
+The driver finds the pinned nightly through `rustup run`.
 
 ---
 

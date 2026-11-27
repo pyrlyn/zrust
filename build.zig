@@ -16,6 +16,7 @@ pub fn build(b: *std.Build) void {
 
     const options = b.addOptions();
     options.addOption([]const u8, "version", version);
+    options.addOption([]const u8, "rust_toolchain", rustToolchain(b));
 
     const zrust = b.addExecutable(.{
         .name = "zrust",
@@ -55,7 +56,33 @@ pub fn build(b: *std.Build) void {
     const shim = installShim(b);
 
     const test_step = b.step("test", "Run the tests");
-    test_step.dependOn(addShimTest(b, shim));
+
+    const zrmir_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/zrmir.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(zrmir_tests).step);
+
+    addDumpTests(b, test_step);
+    test_step.dependOn(addRefusalTest(b, shim));
+    test_step.dependOn(addRejectionTest(b, shim));
+}
+
+/// The channel rust-toolchain.toml pins. The driver asks rustup for exactly this toolchain: the shim is built
+/// against its compiler crates and loads into no other rustc.
+fn rustToolchain(b: *std.Build) []const u8 {
+    const file = "rust-toolchain.toml";
+    const key = "channel = \"";
+    const path = b.root.joinString(b.allocator, file) catch @panic("OOM");
+    const text = std.Io.Dir.cwd().readFileAlloc(b.graph.io, path, b.allocator, .limited(64 * 1024)) catch |err| {
+        std.process.fatal("cannot read {s}: {s}", .{ file, @errorName(err) });
+    };
+    const start = (std.mem.find(u8, text, key) orelse std.process.fatal("{s} has no channel", .{file})) + key.len;
+    const end = std.mem.findScalarPos(u8, text, start, '"') orelse std.process.fatal("{s} has no channel", .{file});
+    return text[start..end];
 }
 
 const Llvm = struct {
@@ -105,9 +132,89 @@ fn installShim(b: *std.Build) Shim {
     return .{ .path = path, .build = &cargo.step };
 }
 
-/// Compiles `tests/run-pass/hello.rs` with the shim as rustc's backend. Until the backend generates
-/// code, a pass means: rustc loaded the shim, the shim listed the crate's mono items, then refused.
-fn addShimTest(b: *std.Build, shim: Shim) *std.Build.Step {
+/// What the shim says when it has written the ZRMIR and stops there.
+const dump_warning = "warning: zrust: code generation is not implemented yet, nothing is compiled or linked";
+
+/// Dumps the ZRMIR of every program in `tests/run-pass`, with and without optimizations, and of the shim crate
+/// itself, through the installed driver. The driver hands the shim `zrust-codegen`, which has to read back every
+/// codegen unit before the shim reports success: a pass means the encoder and the decoder agree on all of them.
+fn addDumpTests(b: *std.Build, test_step: *std.Build.Step) void {
+    const io = b.graph.io;
+    const dir_path = "tests/run-pass";
+    const full_path = b.root.joinString(b.allocator, dir_path) catch @panic("OOM");
+    var dir = std.Io.Dir.cwd().openDir(io, full_path, .{ .iterate = true }) catch |err| {
+        std.process.fatal("cannot open {s}: {s}", .{ dir_path, @errorName(err) });
+    };
+    defer dir.close(io);
+
+    var entries = dir.iterate();
+    while (entries.next(io) catch |err| std.process.fatal("cannot list {s}: {s}", .{ dir_path, @errorName(err) })) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".rs")) continue;
+        const source = b.path(b.fmt("{s}/{s}", .{ dir_path, entry.name }));
+        test_step.dependOn(addDumpTest(b, source, &.{}));
+        test_step.dependOn(addDumpTest(b, source, &.{"-O"}));
+    }
+
+    // The largest Rust program in the repository whose license is ours to test with: about two thousand lines that
+    // lean on generics, closures, trait objects and `std` collections far harder than `tests/run-pass` does.
+    const shim_crate = b.path("shim/src/lib.rs");
+    const crate_args: []const []const u8 = &.{ "--edition", "2024", "--crate-type", "rlib" };
+    test_step.dependOn(addDumpTest(b, shim_crate, crate_args));
+    test_step.dependOn(addDumpTest(b, shim_crate, crate_args ++ .{"-O"}));
+}
+
+fn addDumpTest(b: *std.Build, source: std.Build.LazyPath, rustc_args: []const []const u8) *std.Build.Step {
+    // The installed driver, not the one in the cache: it finds the shim and `zrust-codegen` relative to itself.
+    const name = std.mem.join(b.allocator, " ", rustc_args) catch @panic("OOM");
+    const zrust = std.Build.Step.Run.create(b, b.fmt("dump {s}{s}{s}", .{
+        source.getDisplayName(),
+        if (name.len == 0) "" else " ",
+        name,
+    }));
+    zrust.addFileArg(b.graph.path(.install_bin, "zrust"));
+    zrust.addArg("rustc");
+    zrust.step.dependOn(b.getInstallStep());
+    zrust.setCwd(b.path("."));
+    zrust.has_side_effects = true;
+    zrust.setEnvironmentVariable("ZRUST_KEEP_ZRMIR", "1");
+    zrust.addFileArg(source);
+    zrust.addArgs(rustc_args);
+    zrust.addArg("--out-dir");
+    _ = zrust.addOutputDirectoryArg("zrmir");
+
+    zrust.expectStdErrMatch(dump_warning);
+    zrust.expectStdErrMatch("= note: wrote ");
+    zrust.expectExitCode(0);
+    return &zrust.step;
+}
+
+/// Without `ZRUST_KEEP_ZRMIR` a build must fail: nothing is compiled yet, and a silent success would look like one.
+fn addRefusalTest(b: *std.Build, shim: Shim) *std.Build.Step {
+    const rustc = addShimRustc(b, shim);
+    rustc.setName("refuse to build without ZRUST_KEEP_ZRMIR");
+    rustc.removeEnvironmentVariable("ZRUST_KEEP_ZRMIR");
+    rustc.removeEnvironmentVariable("ZRUST_CODEGEN");
+
+    rustc.expectStdErrMatch("error: zrust: code generation is not implemented yet");
+    rustc.expectExitCode(1);
+    return &rustc.step;
+}
+
+/// A module the code generator rejects fails the build that produced it, dump or not.
+fn addRejectionTest(b: *std.Build, shim: Shim) *std.Build.Step {
+    const rustc = addShimRustc(b, shim);
+    rustc.setName("fail the build when the ZRMIR is rejected");
+    rustc.setEnvironmentVariable("ZRUST_KEEP_ZRMIR", "1");
+    // Stands in for a `zrust-codegen` that finds a fault: it exits with a failure whatever it is given.
+    rustc.setEnvironmentVariable("ZRUST_CODEGEN", "false");
+
+    rustc.expectStdErrMatch("error: zrust: false rejected the ZRMIR");
+    rustc.expectExitCode(1);
+    return &rustc.step;
+}
+
+/// rustc on `tests/run-pass/hello.rs` with the shim as its backend, bypassing the driver.
+fn addShimRustc(b: *std.Build, shim: Shim) *std.Build.Step.Run {
     const rustc = addRustCommand(b, &.{"rustc"});
     rustc.setCwd(b.path("."));
     rustc.addPrefixedFileArg("-Zcodegen-backend=", shim.path);
@@ -115,12 +222,7 @@ fn addShimTest(b: *std.Build, shim: Shim) *std.Build.Step {
     rustc.addArg("--out-dir");
     _ = rustc.addOutputDirectoryArg("hello");
     rustc.step.dependOn(shim.build);
-
-    rustc.expectStdErrMatch("zrust: cgu hello.");
-    rustc.expectStdErrMatch("zrust:   fn main [");
-    rustc.expectStdErrMatch("error: zrust: code generation is not implemented yet");
-    rustc.expectExitCode(1);
-    return &rustc.step;
+    return rustc;
 }
 
 /// A command of the pinned Rust toolchain. Its working directory must be inside the repository:

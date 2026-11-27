@@ -5,15 +5,25 @@
 
 #![feature(rustc_private)]
 
+extern crate rustc_attr_ir;
 extern crate rustc_codegen_ssa;
 // Not used by name, but the dylib must link against rustc's own driver library
 // to resolve compiler symbols once rustc loads it.
 extern crate rustc_driver;
+extern crate rustc_metadata;
 extern crate rustc_middle;
+extern crate rustc_public;
+extern crate rustc_public_bridge;
 extern crate rustc_session;
+extern crate rustc_span;
+extern crate rustc_target;
+extern crate serde;
+extern crate serde_json;
 extern crate smallvec;
 
 mod backend;
+mod encode;
+mod zrmir;
 
 use rustc_codegen_ssa::traits::CodegenBackend;
 
