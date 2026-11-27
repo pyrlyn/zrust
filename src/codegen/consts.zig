@@ -22,8 +22,7 @@ pub fn scalar(l: *const Lowering, memory: *const schema.Memory, kind: schema.Sca
     var words = [2]u64{ 0, 0 };
     if (size > @sizeOf(@TypeOf(words))) return l.malformed("a scalar constant of {d} bytes", .{size});
     for (0..size) |at| {
-        // The validator has checked the digits.
-        const byte: u64 = std.fmt.parseInt(u8, memory.bytes[at * 2 ..][0..2], 16) catch unreachable;
+        const byte: u64 = byteAt(memory, at).?;
         const significance = switch (l.source.target.endian) {
             .little => at,
             .big => size - 1 - at,
@@ -44,4 +43,34 @@ pub fn scalar(l: *const Lowering, memory: *const schema.Memory, kind: schema.Sca
         .float => llvm.LLVMConstBitCast(bits, ty),
         .pointer => llvm.LLVMConstIntToPtr(bits, ty),
     };
+}
+
+/// A constant that is not a scalar, as a global that holds its bytes.
+pub fn global(l: *const Lowering, memory: *const schema.Memory, layout: *const schema.Layout) codegen.Error!llvm.LLVMValueRef {
+    if (memory.relocs.len != 0) return l.unsupported("a constant that points into another allocation", .{});
+    const size = memory.bytes.len / 2;
+    if (size != layout.size) return l.malformed("a constant of {d} bytes for a type of {d}", .{ size, layout.size });
+
+    const byte = llvm.LLVMInt8TypeInContext(l.context);
+    const elements = try l.arena.alloc(llvm.LLVMValueRef, size);
+    for (elements, 0..) |*element, at| {
+        element.* = if (byteAt(memory, at)) |defined| llvm.LLVMConstInt(byte, defined, 0) else llvm.LLVMGetUndef(byte);
+    }
+    const value = llvm.LLVMAddGlobal(l.module, types.bytes(l, size), "");
+    llvm.LLVMSetInitializer(value, llvm.LLVMConstArray2(byte, elements.ptr, size));
+    llvm.LLVMSetGlobalConstant(value, 1);
+    llvm.LLVMSetLinkage(value, llvm.LLVMPrivateLinkage);
+    // The constant is read, never compared by address, so equal ones may share their bytes.
+    llvm.LLVMSetUnnamedAddress(value, llvm.LLVMGlobalUnnamedAddr);
+    // The validator has bounded the alignment.
+    llvm.LLVMSetAlignment(value, @intCast(layout.@"align"));
+    return value;
+}
+
+/// The byte at an index, or null where the constant is not initialised.
+fn byteAt(memory: *const schema.Memory, at: usize) ?u8 {
+    const digits = memory.bytes[at * 2 ..][0..2];
+    if (std.mem.eql(u8, digits, "__")) return null;
+    // The validator has checked the digits.
+    return std.fmt.parseInt(u8, digits, 16) catch unreachable;
 }

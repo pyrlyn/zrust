@@ -39,7 +39,9 @@ pub fn binary(l: *const Lowering, op: schema.BinOp, left: Value, right: Value) c
                     llvm.LLVMBuildLShr(b, left.value, amount, ""),
             });
         },
-        .cmp, .offset => return l.unsupported("the operator `{s}`", .{@tagName(op)}),
+        .cmp => return l.unsupported("the operator `cmp`", .{}),
+        // It needs what the operands do not say, the size of what the pointer points at: see `offset`.
+        .offset => unreachable,
         else => {},
     }
     if (!same) return l.malformed("the operator `{s}` on two values of different kinds", .{@tagName(op)});
@@ -101,6 +103,15 @@ pub fn binary(l: *const Lowering, op: schema.BinOp, left: Value, right: Value) c
             else => unreachable,
         }),
     }
+}
+
+/// The pointer `count` values of `size` bytes further, or back for a negative count. MIR promises that both
+/// pointers are in one allocation.
+pub fn offset(l: *const Lowering, pointer: Value, count: Value, size: u64) codegen.Error!Value {
+    if (pointer.kind.primitive != .pointer) return l.malformed("an offset of something that is not a pointer", .{});
+    if (count.kind.primitive != .int) return l.malformed("an offset by something that is not an integer", .{});
+    var indices = [_]llvm.LLVMValueRef{count.value};
+    return result(pointer, llvm.LLVMBuildInBoundsGEP2(l.builder, types.bytes(l, size), pointer.value, &indices, indices.len, ""));
 }
 
 pub const Checked = struct {

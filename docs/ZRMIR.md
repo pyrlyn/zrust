@@ -503,6 +503,7 @@ What version 2 leaves out, and the phase (`docs/AGENT_PROMPT.md` §9) that needs
 - **Debug info**: no variable names, source scopes or cleanup-block marks. A7.
 - **Function pointer types** carry no signature; the ABI of an indirect call is at the call site.
 - **`FnAbi`** has no "can unwind" flag.
+- **A `cast` pass mode** has no attributes: rustc can ask for a small integer passed this way to be extended, which no target ZRust is tested on does.
 - **Function attributes** (inlining hints, `cold`, `naked`, target features, link sections, instruction sets, whether a function can unwind, frame pointers and unwind tables) and static attributes (link section, `used`) are missing.
 - **Layouts** have no "uninhabited" flag.
 - **Inline assembly** is carried only as the strings `rustc_public` renders, which is not enough to generate code from.
