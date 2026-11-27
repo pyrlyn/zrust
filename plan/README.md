@@ -23,19 +23,27 @@ Phases A0–A8 come from [`docs/AGENT_PROMPT.md`](../docs/AGENT_PROMPT.md) §9. 
 - **`default<O0>` runs too.** Every module goes through `LLVMVerifyModule` and the pass pipeline of its level, so the unoptimized path is the same code as the optimized one.
 - **One `zrust-codegen` process per codegen unit, one after another.** Running them in parallel is A8.
 - **No Zig file lives in a directory named `llvm`.** Zig's LLVM backend names a function after its file path, `llvm.emit.write`, and LLVM rejects a definition whose name starts with `llvm.` as an intrinsic. `src/llvm/` holds only `c.h`; the code that drives LLVM is in `src/codegen/`.
-- **Run-pass tests state their expectations in header comments** (`expect-stdout`, `expect-exit`, `rustc-flags`, `unsupported`; see `README.md`). Stock rustc runs against the same header, and a program marked `unsupported` is checked to be refused, so the mark cannot outlive the gap it describes.
+- **Run-pass tests state their expectations in header comments** (`expect-stdout`, `expect-exit`, `expect-panic`, `rustc-flags`, `unsupported`; see `README.md`). Stock rustc runs against the same header, and a program marked `unsupported` is checked to be refused, so the mark cannot outlive the gap it describes.
 - **The shim crate is the large test input.** `zig build test` dumps `shim/src/lib.rs` (over 2000 lines, heavy use of generics, closures, traits and std) next to `tests/run-pass/`, each with and without `-O`. It is what found the LLVM-intrinsic calls version 1 of the format got wrong.
 - **The driver runs rustc through `rustup run <pinned nightly>`**, reading the channel from `rust-toolchain.toml` at build time, so it works from any directory and ignores `RUSTUP_TOOLCHAIN`.
 - **`zrust dump-zrmir` owns `target/zrmir/<file stem>/`**: it deletes stale `.zrmir` files there before a run, so the printed list is exactly what the run produced.
+- **Values are computed in their immediate form and stored in their memory form.** The two differ only for `bool`: `i1` in a register, an argument or a return value, `i8` in a stack slot. Every load and store converts.
+- **A place is a pointer, a layout and an alignment.** A field is the parent's pointer plus the offset rustc's layout gives, as a byte `getelementptr`; no LLVM struct type exists. The alignment of a field is what its address is known to be a multiple of, which may be less than its type asks.
+- **A function is declared when something first refers to it**, with the ABI its symbol names. Defining it later adds the linkage, the visibility and the body, so a module declares only what it uses.
+- **A failed assertion is a trap, for now.** `Assert` branches to one `llvm.trap` block per function. Calling the panic function needs its `&Location` argument, a constant with relocations (A5). Under `-C panic=abort` the program still dies, only without running its panic handler; where panics unwind an assertion is refused, because there a trap would be another program.
+- **The run-pass runner knows how a program dies.** `expect-panic` expects `SIGABRT` from stock rustc's build (the test's panic handler calls `abort`) and the host's trap signal from ZRust's: `SIGTRAP` on aarch64, `SIGILL` on x86_64.
 - **`zrust cargo` is postponed** until a crate can be built at all (A6 at the earliest).
 
-## Known gaps after A3
+## Known gaps after A4
 
 What the code generator accepts today is compiled correctly but plainly. Missing, with the phase that needs it:
 
-- Function attributes: `nounwind`, `uwtable`, frame pointers, `"target-cpu"` and `"target-features"` (the target machine's defaults apply), and the optimization attributes of arguments (`noundef`, `nonnull`, …). A4–A7.
+- Function attributes: `nounwind`, `uwtable`, frame pointers, `"target-cpu"` and `"target-features"` (the target machine's defaults apply), and the optimization attributes of arguments (`noundef`, `nonnull`, …). A5–A7.
 - `dso_local`, `unnamed_addr` and the "PIC Level" / "PIE Level" module flags. A5.
-- Calling conventions other than C and Rust; pass modes other than `ignore` and a `direct` scalar. A4–A5.
+- Calling conventions other than C and Rust; pass modes other than `ignore` and a `direct` scalar. A5.
+- A failed assertion traps instead of calling its panic function, and is refused where panics unwind. A5–A6.
+- Places behind a pointer, indexing and enum variants; values that are not scalars, except the `(T, bool)` result of a checked operator; the `cmp` and `offset` operators; casts that make or change a wide pointer. A5.
+- Intrinsics (`core::intrinsics` and `llvm.*` calls), calls that pass their caller's location, `rust-call`, cleanup blocks. A5–A7.
 - `-C target-feature` is refused by the shim. A7.
 - No allocator module, and `--emit=metadata`-only builds are not special-cased. A6.
 - `zrust-codegen --emit=bc`.

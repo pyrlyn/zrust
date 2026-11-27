@@ -30,6 +30,25 @@ pub fn scalar(l: *const Lowering, value: schema.Scalar, form: Form) codegen.Erro
     };
 }
 
+/// The scalar every comparison gives back.
+pub const boolean: schema.Scalar = .{ .primitive = .bool, .valid_range = null };
+
+/// How many bits a scalar takes where it is stored.
+pub fn bits(l: *const Lowering, value: schema.Scalar) u32 {
+    return switch (value.primitive) {
+        .bool => 8,
+        .int => |int| int.bits,
+        .float => |float| switch (float.format) {
+            .f16, .f16b => 16,
+            .f32 => 32,
+            .f64 => 64,
+            .x87_f80 => 80,
+            .f128, .ppc_f128 => 128,
+        },
+        .pointer => l.source.target.pointer_width,
+    };
+}
+
 /// The type of a stack slot or a global that holds a value of this layout.
 pub fn memory(l: *const Lowering, layout: *const schema.Layout) codegen.Error!llvm.LLVMTypeRef {
     return switch (layout.repr) {

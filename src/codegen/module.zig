@@ -36,6 +36,39 @@ pub const Lowering = struct {
     pub fn layoutOf(l: *const Lowering, id: schema.LayoutId) *const schema.Layout {
         return &l.source.layouts[id.index()];
     }
+
+    /// The LLVM function of a symbol, declared on first use: a module calls more functions than it defines.
+    pub fn functionOf(l: *const Lowering, id: schema.SymbolId) codegen.Error!llvm.LLVMValueRef {
+        const symbol = &l.source.symbols[id.index()];
+        const fn_abi = switch (symbol.kind) {
+            .@"fn" => |kind| &l.source.fn_abis[kind.abi.index()],
+            .static => return l.malformed("the static `{s}` is used as a function", .{symbol.name}),
+        };
+        return abi.declare(l, symbol.name, fn_abi);
+    }
+
+    /// Calls an LLVM intrinsic. `overloads` are the types that pick one of its versions, in the order LLVM documents
+    /// for the intrinsic; the name is without them.
+    pub fn callIntrinsic(
+        l: *const Lowering,
+        name: []const u8,
+        overloads: []const llvm.LLVMTypeRef,
+        args: []const llvm.LLVMValueRef,
+    ) llvm.LLVMValueRef {
+        const id = llvm.LLVMLookupIntrinsicID(name.ptr, name.len);
+        // Only names written in this program get here, so an unknown one is a typo in it.
+        std.debug.assert(id != 0);
+        // The C API takes mutable pointers and changes nothing.
+        const overload_types: [*c]llvm.LLVMTypeRef = @constCast(overloads.ptr);
+        return llvm.LLVMBuildCall2(
+            l.builder,
+            llvm.LLVMIntrinsicGetType(l.context, id, overload_types, overloads.len),
+            llvm.LLVMGetIntrinsicDeclaration(l.module, id, overload_types, overloads.len),
+            @constCast(args.ptr),
+            @intCast(args.len),
+            "",
+        );
+    }
 };
 
 pub fn lowerModule(
@@ -68,11 +101,14 @@ pub fn lowerModule(
         const name = source.symbols[source.statics[0].symbol.index()].name;
         return lowering.unsupported("a static (`{s}`)", .{name});
     }
+    // Declared before any body is lowered, so that a call finds its callee with the linkage of the definition
+    // whichever of the two comes first in the module.
+    for (source.functions) |*item| abi.define(try lowering.functionOf(item.symbol), item);
     for (source.functions) |*item| {
         const symbol = &source.symbols[item.symbol.index()];
+        // The validator has checked that the symbol of a function is one.
         const fn_abi = &source.fn_abis[symbol.kind.@"fn".abi.index()];
-        const value = try abi.declare(&lowering, item, symbol.name, fn_abi);
-        try function.lower(&lowering, item, symbol.name, fn_abi, value);
+        try function.lower(&lowering, item, symbol.name, fn_abi, try lowering.functionOf(item.symbol));
     }
     return module;
 }

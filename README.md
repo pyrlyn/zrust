@@ -2,7 +2,7 @@
 
 **ZRust** is an experimental Rust compiler written in **Zig** with an **LLVM** backend.
 
-- **Status:** phase A3 — rustc runs with ZRust as its code generator: every codegen unit is written out as [ZRMIR](docs/ZRMIR.md), the Zig side turns it into an object file through LLVM, and rustc links the result. So far this covers only the smallest programs (integer constants, locals, `return`); everything else, `std` programs included, is refused with an error that names the construct. This README contains the full plan; the same text lives in [`docs/PLAN.md`](docs/PLAN.md). Tasks are tracked in [`plan/`](plan/README.md).
+- **Status:** phase A4 — rustc runs with ZRust as its code generator: every codegen unit is written out as [ZRMIR](docs/ZRMIR.md), the Zig side turns it into an object file through LLVM, and rustc links the result. So far this covers `#![no_std]` programs that compute with scalars: integer, float, `bool` and `char` arithmetic, casts, branches, loops, calls, recursion and function pointers. Everything else (references, structs, enums, statics, `std`) is refused with an error that names the construct, and a failed assertion such as an integer overflow stops the program with a trap instead of a panic message. This README contains the full plan; the same text lives in [`docs/PLAN.md`](docs/PLAN.md). Tasks are tracked in [`plan/`](plan/README.md).
 - **Recommended path:** reuse the existing `rustc` frontend through `rustc_private` / `rustc_public` and write the backend (MIR → LLVM IR → object) and the driver in Zig. Step-by-step instructions for an implementing agent: [`docs/AGENT_PROMPT.md`](docs/AGENT_PROMPT.md).
 - **Alternative path:** a from-scratch frontend in Zig, sharing the same backend.
 
@@ -44,6 +44,7 @@ The driver finds the pinned nightly through `rustup run`.
 | --- | --- |
 | `// expect-stdout: <line>` | One line of the expected output; repeat it for more lines. |
 | `// expect-exit: <code>` | The expected exit code; `0` when absent. |
+| `// expect-panic: <what fails>` | The program must die from a failed assertion instead of exiting: stock rustc's build from the `abort` in the program's own panic handler, ZRust's from a trap. |
 | `// rustc-flags: <flags>` | Extra arguments for both compilers. |
 | `// unsupported: <reason>` | ZRust cannot build the program yet: the test expects its "is not supported yet" error instead of a binary. |
 

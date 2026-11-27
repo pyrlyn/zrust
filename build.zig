@@ -152,6 +152,7 @@ fn installShim(b: *std.Build) Shim {
 ///
 ///     // expect-stdout: <a line the program prints>     (once per line)
 ///     // expect-exit: <the exit code, 0 if absent>
+///     // expect-panic: <the assertion that fails>       (the program dies instead of exiting)
 ///     // rustc-flags: <arguments every compilation of the program needs>
 ///     // unsupported: <why zrust cannot compile the program yet>
 const Program = struct {
@@ -160,6 +161,7 @@ const Program = struct {
     rustc_flags: []const []const u8 = &.{},
     stdout: []const u8 = "",
     exit_code: u8 = 0,
+    panics: bool = false,
     unsupported: bool = false,
 };
 
@@ -194,6 +196,8 @@ fn runPassPrograms(b: *std.Build) []const Program {
                 program.exit_code = std.fmt.parseInt(u8, value, 10) catch {
                     std.process.fatal("{s}: `{s}` is not an exit code", .{ path, value });
                 };
+            } else if (std.mem.eql(u8, key, "expect-panic")) {
+                program.panics = true;
             } else if (std.mem.eql(u8, key, "rustc-flags")) {
                 var flags: std.ArrayList([]const u8) = .empty;
                 var words = std.mem.tokenizeScalar(u8, value, ' ');
@@ -267,7 +271,9 @@ fn addRunPassTests(b: *std.Build, step: *std.Build.Step, program: *const Program
     reference.addArg("-o");
     const reference_exe = reference.addOutputFileArg(stem);
     reference.expectExitCode(0);
-    step.dependOn(addRun(b, b.fmt("run {s} (rustc)", .{program.name}), reference_exe, program));
+    // A panic of the reference reaches the program's own handler, and the handler of such a test aborts.
+    const reference_end: std.process.Child.Term = if (program.panics) .{ .signal = .ABRT } else .{ .exited = program.exit_code };
+    step.dependOn(addRun(b, b.fmt("run {s} (rustc)", .{program.name}), reference_exe, program, reference_end));
 
     if (program.unsupported) {
         // The marker has to go when the program starts to compile: a test nobody runs proves nothing.
@@ -280,21 +286,34 @@ fn addRunPassTests(b: *std.Build, step: *std.Build.Step, program: *const Program
         return;
     }
 
+    // zrust does not call the panic functions yet: a failed assertion is a trap, and the signal a trap raises is the
+    // host's business.
+    const end: std.process.Child.Term = if (!program.panics) .{ .exited = program.exit_code } else switch (b.graph.host.result.cpu.arch) {
+        .aarch64 => .{ .signal = .TRAP },
+        .x86_64 => .{ .signal = .ILL },
+        else => |arch| std.process.fatal("{s}: no trap signal is known for {s}", .{ program.name, @tagName(arch) }),
+    };
     for ([_][]const []const u8{ &.{}, &.{"-O"} }) |variant| {
         const rustc_args = concat(b, program.rustc_flags, variant);
         const zrust = addZrustRustc(b, describe(b, "zrust", program.name, rustc_args), program.source, rustc_args);
         zrust.addArg("-o");
         const exe = zrust.addOutputFileArg(stem);
         zrust.expectExitCode(0);
-        step.dependOn(addRun(b, describe(b, "run", program.name, variant), exe, program));
+        step.dependOn(addRun(b, describe(b, "run", program.name, variant), exe, program, end));
     }
 }
 
-fn addRun(b: *std.Build, name: []const u8, exe: std.Build.LazyPath, program: *const Program) *std.Build.Step {
+fn addRun(
+    b: *std.Build,
+    name: []const u8,
+    exe: std.Build.LazyPath,
+    program: *const Program,
+    end: std.process.Child.Term,
+) *std.Build.Step {
     const run = std.Build.Step.Run.create(b, name);
     run.addFileArg(exe);
     run.expectStdOutEqual(program.stdout);
-    run.expectExitCode(program.exit_code);
+    run.addCheck(.{ .expect_term = end });
     return &run.step;
 }
 
