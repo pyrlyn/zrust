@@ -11,6 +11,7 @@ const codegen = @import("../codegen.zig");
 const schema = @import("../zrmir/schema.zig");
 const abi = @import("abi.zig");
 const consts = @import("consts.zig");
+const globals = @import("globals.zig");
 const Lowering = @import("module.zig").Lowering;
 const rvalue = @import("rvalue.zig");
 const types = @import("types.zig");
@@ -67,6 +68,9 @@ const Place = struct {
     address: Address,
     ty: schema.TypeId,
     layout: *const schema.Layout,
+    /// What the wide pointer the place was reached through carries besides the address: the length of a slice or of
+    /// a `str`, or of the one an unsized struct ends with. Null for a type with a size, which needs nothing more.
+    extra: ?Value = null,
 };
 
 /// What reading a place or an operand gives.
@@ -78,13 +82,35 @@ const Read = union(enum) {
     memory: Place,
 };
 
-/// An array as its layout and its type describe it together.
+/// An array or a slice as its layout and its type describe it together.
 const Array = struct {
     element: schema.TypeId,
     layout: *const schema.Layout,
     stride: u64,
-    count: u64,
+    count: Count,
+
+    const Count = union(enum) {
+        /// An array has as many elements as its type says.
+        fixed: u64,
+        /// A slice has as many as the pointer to it says.
+        carried: Value,
+    };
+
+    fn fixed(array: Array, l: *const Lowering) codegen.Error!u64 {
+        return switch (array.count) {
+            .fixed => |count| count,
+            .carried => l.malformed("a slice where an array belongs", .{}),
+        };
+    }
 };
+
+/// Whether values of the layout have a size only a pointer to them knows.
+fn unsized(layout: *const schema.Layout) bool {
+    return switch (layout.repr) {
+        .aggregate => |aggregate| !aggregate.sized,
+        else => false,
+    };
+}
 
 const Function = struct {
     l: *const Lowering,
@@ -213,10 +239,17 @@ const Function = struct {
         return layout;
     }
 
+    /// The layout of a type whose values have a size of their own, which is every type a value is read or written as.
     fn sized(f: *Function, id: schema.TypeId, comptime what: []const u8) codegen.Error!*const schema.Layout {
+        const layout = try f.laidOut(id, what);
+        if (unsized(layout)) return f.l.unsupported(what ++ " of the unsized type `{s}`", .{f.l.typeOf(id).name});
+        return layout;
+    }
+
+    fn laidOut(f: *Function, id: schema.TypeId, comptime what: []const u8) codegen.Error!*const schema.Layout {
         const l = f.l;
         const ty = l.typeOf(id);
-        return l.layoutOf(ty.layout orelse return l.unsupported(what ++ " of the unsized type `{s}`", .{ty.name}));
+        return l.layoutOf(ty.layout orelse return l.unsupported(what ++ " of `{s}`, a type without a layout", .{ty.name}));
     }
 
     /// Stack memory that lives as long as the call. It is taken in the entry block whichever block needs it: an
@@ -264,15 +297,20 @@ const Function = struct {
             .copy_for_deref => |*source| return f.write(into, try f.readPlace(try f.placeOf(source))),
             .aggregate => |*aggregate| return f.lowerAggregate(into, aggregate),
             .repeat => |*repeat| return f.lowerRepeat(into, &repeat.operand, repeat.count),
-            .ref => |*ref| try f.pointerTo(&ref.place, into),
-            .address_of => |*raw| try f.pointerTo(&raw.place, into),
+            .ref => |*ref| return f.pointerTo(into, &ref.place),
+            .address_of => |*raw| return f.pointerTo(into, &raw.place),
             .binary_op => |*op| switch (op.op) {
                 .offset => moved: {
                     const pointer = try f.typed(&op.left);
                     const target = try f.sized(try f.pointeeOf(pointer.ty), "a pointer offset between values");
                     break :moved try rvalue.offset(l, try f.scalarIn(pointer.read, .pointer), try f.scalarOf(&op.right, .int), target.size);
                 },
-                else => try rvalue.binary(l, op.op, try f.scalarOf(&op.left, null), try f.scalarOf(&op.right, null)),
+                else => operated: {
+                    const left = try f.read(&op.left);
+                    // Wide pointers, which compare part by part.
+                    if (left == .memory) return l.unsupported("the operator `{s}` on values that are not scalars", .{@tagName(op.op)});
+                    break :operated try rvalue.binary(l, op.op, try f.scalarIn(left, null), try f.scalarOf(&op.right, null));
+                },
             },
             .checked_binary_op => |*op| {
                 const result = try rvalue.checked(l, op.op, try f.scalarOf(&op.left, .int), try f.scalarOf(&op.right, .int));
@@ -283,23 +321,54 @@ const Function = struct {
                 };
                 return f.storePair(into.address, pair, result.value, result.overflowed);
             },
-            .unary_op => |*op| try rvalue.unary(l, op.op, try f.scalarOf(&op.operand, null)),
-            .cast => |*cast| try f.lowerCast(cast.kind, &cast.operand, cast.ty),
+            .unary_op => |*op| switch (op.op) {
+                .ptr_metadata => return f.lowerMetadata(into, &op.operand),
+                else => try rvalue.unary(l, op.op, try f.scalarOf(&op.operand, null)),
+            },
+            .cast => |*cast| return f.lowerCast(into, cast),
             else => |*other| return l.unsupported("the rvalue `{s}`", .{@tagName(other.*)}),
         };
         try f.write(into, .{ .scalar = value });
     }
 
-    /// The address of a place as the pointer or reference `into` holds.
-    fn pointerTo(f: *Function, place: *const schema.Place, into: Place) codegen.Error!Value {
+    /// Assigns a pointer or a reference to a place: its address, and with it what a wide pointer carries.
+    fn pointerTo(f: *Function, into: Place, place: *const schema.Place) codegen.Error!void {
         const l = f.l;
         const target = try f.placeOf(place);
-        const kind = switch (into.layout.repr) {
-            .scalar => |repr| repr.scalar,
-            else => return l.malformed("a pointer to a value with a size is not a scalar", .{}),
-        };
-        if (kind.primitive != .pointer) return l.malformed("the address of a place is assigned to something that is not a pointer", .{});
-        return .{ .value = target.address.pointer, .kind = kind };
+        switch (into.layout.repr) {
+            .scalar => |repr| {
+                if (target.extra != null) return l.malformed("a thin pointer to a value of an unsized type", .{});
+                try f.write(into, .{ .scalar = try f.asPointer(target.address.pointer, repr.scalar) });
+            },
+            .scalar_pair => |pair| {
+                const extra = target.extra orelse return l.malformed("a wide pointer to a value of a type with a size", .{});
+                try f.storePair(into.address, pair, try f.asPointer(target.address.pointer, pair.a), extra);
+            },
+            else => return l.malformed("a pointer that is neither a scalar nor a pair of them", .{}),
+        }
+    }
+
+    /// An address as a value of the kind a pointer is stored as.
+    fn asPointer(f: *Function, address: llvm.LLVMValueRef, kind: schema.Scalar) codegen.Error!Value {
+        if (kind.primitive != .pointer) return f.l.malformed("an address is assigned to something that is not a pointer", .{});
+        return .{ .value = address, .kind = kind };
+    }
+
+    /// Assigns what a pointer carries besides its address.
+    fn lowerMetadata(f: *Function, into: Place, operand: *const schema.Operand) codegen.Error!void {
+        const l = f.l;
+        switch (try f.read(operand)) {
+            // A thin pointer carries nothing, and the place is one for nothing.
+            .scalar => |pointer| {
+                if (pointer.kind.primitive != .pointer) return l.malformed("the metadata of a value that is no pointer", .{});
+                try f.write(into, .nothing);
+            },
+            .memory => |pointer| switch (pointer.layout.repr) {
+                .scalar_pair => |pair| try f.write(into, .{ .scalar = try f.loadScalar(pointer.address.offset(l, pair.b_offset), pair.b) }),
+                else => return l.malformed("the metadata of a value that is no pointer", .{}),
+            },
+            .nothing => return l.malformed("the metadata of a value without a size", .{}),
+        }
     }
 
     /// Writes the parts of a new value where they belong in it, one after another.
@@ -310,11 +379,9 @@ const Function = struct {
         switch (aggregate.kind) {
             .array => {
                 const array = try f.arrayOf(into);
-                if (operands.len != array.count) return l.malformed("an array of {d} is built from {d} values", .{ array.count, operands.len });
-                for (operands, 0..) |*operand, index| {
-                    const element: Place = .{ .address = into.address.offset(l, index * array.stride), .ty = array.element, .layout = array.layout };
-                    try f.write(element, try f.read(operand));
-                }
+                const count = try array.fixed(l);
+                if (operands.len != count) return l.malformed("an array of {d} is built from {d} values", .{ count, operands.len });
+                for (operands, 0..) |*operand, index| try f.write(nth(l, into, array, index), try f.read(operand));
             },
             .tuple => {
                 const fields = switch (ty.kind) {
@@ -344,6 +411,20 @@ const Function = struct {
                     try f.write(try f.fieldOf(into, @intCast(index), field.ty), try f.read(operand));
                 }
             },
+            // A pointer put together from its address and what it carries.
+            .raw_ptr => {
+                if (operands.len != 2) return l.malformed("a pointer is built from {d} values", .{operands.len});
+                const address = try f.scalarOf(&operands[0], .pointer);
+                const carried = try f.read(&operands[1]);
+                switch (into.layout.repr) {
+                    .scalar => |repr| {
+                        if (carried != .nothing) return l.malformed("a thin pointer is built with metadata", .{});
+                        try f.write(into, .{ .scalar = try f.asPointer(address.value, repr.scalar) });
+                    },
+                    .scalar_pair => |pair| try f.storePair(into.address, pair, try f.asPointer(address.value, pair.a), try f.scalarIn(carried, null)),
+                    else => return l.malformed("a pointer that is neither a scalar nor a pair of them", .{}),
+                }
+            },
             else => |other| return l.unsupported("a value built as `{s}`", .{@tagName(other)}),
         }
     }
@@ -353,7 +434,8 @@ const Function = struct {
         const l = f.l;
         const b = l.builder;
         const array = try f.arrayOf(into);
-        if (array.count != count) return l.malformed("an array of {d} is filled with {d} values", .{ array.count, count });
+        const declared = try array.fixed(l);
+        if (declared != count) return l.malformed("an array of {d} is filled with {d} values", .{ declared, count });
         const value = try f.read(operand);
         if (count == 0 or array.layout.size == 0) return;
 
@@ -376,21 +458,83 @@ const Function = struct {
         llvm.LLVMPositionBuilderAtEnd(b, after);
     }
 
-    fn lowerCast(f: *Function, kind: schema.CastKind, operand: *const schema.Operand, to: schema.TypeId) codegen.Error!Value {
+    fn lowerCast(f: *Function, into: Place, cast: *const @FieldType(schema.Rvalue, "cast")) codegen.Error!void {
         const l = f.l;
-        const ty = l.typeOf(to);
-        const layout = l.layoutOf(ty.layout orelse return l.malformed("a cast to the unsized type `{s}`", .{ty.name}));
-        const scalar = switch (layout.repr) {
+        const operand = try f.typed(&cast.operand);
+        const scalar: ?schema.Scalar = switch (into.layout.repr) {
             .scalar => |repr| repr.scalar,
-            else => return l.unsupported("the cast `{s}` to `{s}`, which is not a scalar", .{ @tagName(kind), ty.name }),
+            else => null,
         };
-        switch (kind) {
+        switch (cast.kind) {
             // The operand is the function item itself, a value without a size: the pointer comes from its symbol.
             .reify_fn_pointer => |reified| {
-                if (scalar.primitive != .pointer) return l.malformed("a function pointer that is not a pointer", .{});
-                return .{ .value = try l.functionOf(reified.symbol), .kind = scalar };
+                const kind = scalar orelse return l.malformed("a function pointer that is not a scalar", .{});
+                return f.write(into, .{ .scalar = try f.asPointer(try l.functionOf(reified.symbol), kind) });
             },
-            else => return rvalue.cast(l, kind, try f.scalarOf(operand, null), scalar),
+            .unsize => return f.lowerUnsize(into, operand, cast.ty),
+            .transmute => return f.lowerTransmute(into, operand.read),
+            // A pointer that changes only its Rust type stays the same value, a wide one too; one that gives up what
+            // it carries keeps its address.
+            .ptr_to_ptr, .mut_to_const_pointer => if (operand.read == .memory) {
+                const from = operand.read.memory;
+                const pair = switch (from.layout.repr) {
+                    .scalar_pair => |pair| pair,
+                    else => return l.malformed("a pointer cast of a value that is no pointer", .{}),
+                };
+                if (scalar) |thin| {
+                    return f.write(into, .{ .scalar = try rvalue.cast(l, cast.kind, try f.loadScalar(from.address, pair.a), thin) });
+                }
+                if (into.layout.repr != .scalar_pair) return l.malformed("a pointer cast to a value that is no pointer", .{});
+                return f.write(into, operand.read);
+            },
+            else => {},
+        }
+        const to = scalar orelse {
+            return l.unsupported("the cast `{s}` to `{s}`, which is not a scalar", .{ @tagName(cast.kind), l.typeOf(cast.ty).name });
+        };
+        try f.write(into, .{ .scalar = try rvalue.cast(l, cast.kind, try f.scalarIn(operand.read, null), to) });
+    }
+
+    /// Makes a wide pointer of a thin one: the length an array has in its type becomes a part of the pointer.
+    fn lowerUnsize(f: *Function, into: Place, operand: Typed, to: schema.TypeId) codegen.Error!void {
+        const l = f.l;
+        const target = l.typeOf(f.tailOf(try f.pointeeOf(to)));
+        if (target.kind != .slice) return l.unsupported("an unsizing cast to a pointer to `{s}`", .{target.name});
+        const source = l.typeOf(f.tailOf(try f.pointeeOf(operand.ty)));
+        const len = switch (source.kind) {
+            .array => |array| array.len,
+            else => return l.malformed("an unsizing cast of `{s}` to a slice", .{source.name}),
+        };
+        const pair = switch (into.layout.repr) {
+            .scalar_pair => |pair| pair,
+            else => return l.malformed("a pointer to a slice that is not a pair of scalars", .{}),
+        };
+        if (pair.b.primitive != .int) return l.malformed("a slice whose length is not an integer", .{});
+        const pointer = try f.scalarIn(operand.read, .pointer);
+        const count: Value = .{ .value = llvm.LLVMConstInt(try types.scalar(l, pair.b, .immediate), len, 0), .kind = pair.b };
+        try f.storePair(into.address, pair, try f.asPointer(pointer.value, pair.a), count);
+    }
+
+    /// Assigns the bytes of a value as a value of another type of the same size.
+    fn lowerTransmute(f: *Function, into: Place, value: Read) codegen.Error!void {
+        const l = f.l;
+        switch (value) {
+            .nothing => try f.write(into, .nothing),
+            .scalar => |scalar| switch (into.layout.repr) {
+                .scalar => |repr| try f.write(into, .{ .scalar = try rvalue.cast(l, .transmute, scalar, repr.scalar) }),
+                // Stored as what it is: the place holds the same bytes whatever they are read as later.
+                else => {
+                    if (types.bits(l, scalar.kind) != into.layout.size * 8) return l.malformed("a transmute between values of different sizes", .{});
+                    try f.storeScalar(scalar, into.address, scalar.kind);
+                },
+            },
+            .memory => |from| {
+                if (from.layout.size != into.layout.size) return l.malformed("a transmute between values of different sizes", .{});
+                switch (into.layout.repr) {
+                    .scalar => |repr| try f.write(into, .{ .scalar = try f.loadScalar(from.address, repr.scalar) }),
+                    else => f.copyBytes(into.address, from.address, into.layout.size),
+                }
+            },
         }
     }
 
@@ -651,10 +795,13 @@ const Function = struct {
                 };
                 const layout = try f.sized(constant.ty, "a constant");
                 if (layout.size == 0) return .{ .read = .nothing, .ty = constant.ty };
+                if (memory.bytes.len / 2 != layout.size) {
+                    return l.malformed("a constant of {d} bytes for a type of {d}", .{ memory.bytes.len / 2, layout.size });
+                }
                 const value: Read = switch (layout.repr) {
                     .scalar => |repr| .{ .scalar = .{ .value = try consts.scalar(l, memory, repr.scalar), .kind = repr.scalar } },
                     else => .{ .memory = .{
-                        .address = .{ .pointer = try consts.global(l, memory, layout), .alignment = layout.@"align" },
+                        .address = .{ .pointer = try globals.constant(l, memory, layout.@"align"), .alignment = layout.@"align" },
                         .ty = constant.ty,
                         .layout = layout,
                     } },
@@ -704,16 +851,30 @@ const Function = struct {
         };
     }
 
+    /// The type an unsized type has no size because of: itself, or the last field of the last field of a struct, and
+    /// so on. A pointer to the type carries what a pointer to that one would.
+    fn tailOf(f: *Function, id: schema.TypeId) schema.TypeId {
+        var current = id;
+        while (true) {
+            const fields: []const schema.TypeId = switch (f.l.typeOf(current).kind) {
+                .adt => |adt| {
+                    if (adt.kind != .@"struct" or adt.variants.len != 1 or adt.variants[0].fields.len == 0) return current;
+                    current = adt.variants[0].fields[adt.variants[0].fields.len - 1].ty;
+                    continue;
+                },
+                .tuple => |tuple| tuple.fields,
+                else => return current,
+            };
+            if (fields.len == 0) return current;
+            current = fields[fields.len - 1];
+        }
+    }
+
     fn placeOf(f: *Function, place: *const schema.Place) codegen.Error!Place {
         const l = f.l;
         var current = f.slots[place.local.index()];
         for (place.projection) |*element| current = switch (element.*) {
-            .deref => pointee: {
-                const target = try f.pointeeOf(current.ty);
-                const layout = try f.sized(target, "a place");
-                const pointer = try f.scalarIn(try f.readPlace(current), .pointer);
-                break :pointee .{ .address = .{ .pointer = pointer.value, .alignment = layout.@"align" }, .ty = target, .layout = layout };
-            },
+            .deref => try f.pointeeAt(current),
             .field => |field| try f.fieldOf(current, field.index, field.ty),
             .index => |index| at: {
                 const array = try f.arrayOf(current);
@@ -721,21 +882,87 @@ const Function = struct {
                 // MIR asserts that the index is in bounds before it uses it.
                 break :at elementAt(l, current, array, position.value);
             },
+            // MIR has checked `min_length` where the length is not in the type.
             .constant_index => |constant| at: {
-                if (constant.from_end) return l.unsupported("an element counted from the end", .{});
                 const array = try f.arrayOf(current);
-                if (constant.offset >= array.count) return l.malformed("element {d} of an array of {d}", .{ constant.offset, array.count });
-                break :at .{ .address = current.address.offset(l, constant.offset * array.stride), .ty = array.element, .layout = array.layout };
+                switch (array.count) {
+                    .fixed => |count| {
+                        const valid = if (constant.from_end) constant.offset != 0 and constant.offset <= count else constant.offset < count;
+                        if (!valid) return l.malformed("element {d} of an array of {d}", .{ constant.offset, count });
+                        break :at nth(l, current, array, if (constant.from_end) count - constant.offset else constant.offset);
+                    },
+                    .carried => |len| {
+                        const offset = llvm.LLVMConstInt(llvm.LLVMTypeOf(len.value), constant.offset, 0);
+                        const index = if (constant.from_end) llvm.LLVMBuildNUWSub(l.builder, len.value, offset, "") else offset;
+                        break :at elementAt(l, current, array, index);
+                    },
+                }
+            },
+            .subslice => |part| kept: {
+                const array = try f.arrayOf(current);
+                const len = switch (array.count) {
+                    .carried => |len| len,
+                    // A part of an array is an array of another length, a type the projection does not name.
+                    .fixed => return l.unsupported("a place that is a part of an array", .{}),
+                };
+                if (!part.from_end) return l.malformed("a part of a slice whose end is counted from its start", .{});
+                const dropped = std.math.add(u64, part.from, part.to) catch return l.malformed("a part of a slice without {d} and {d} elements", .{ part.from, part.to });
+                const word = llvm.LLVMTypeOf(len.value);
+                const first = elementAt(l, current, array, llvm.LLVMConstInt(word, part.from, 0));
+                break :kept .{
+                    .address = first.address,
+                    .ty = current.ty,
+                    .layout = current.layout,
+                    .extra = .{
+                        .value = llvm.LLVMBuildNUWSub(l.builder, len.value, llvm.LLVMConstInt(word, dropped, 0), ""),
+                        .kind = .{ .primitive = len.kind.primitive, .valid_range = null },
+                    },
+                };
             },
             else => |*other| return l.unsupported("a place through `{s}`", .{@tagName(other.*)}),
         };
         return current;
     }
 
+    /// What the pointer or the reference in a place points at.
+    fn pointeeAt(f: *Function, pointer: Place) codegen.Error!Place {
+        const l = f.l;
+        const target = try f.pointeeOf(pointer.ty);
+        const layout = try f.laidOut(target, "a place");
+        const name = l.typeOf(target).name;
+        switch (try f.readPlace(pointer)) {
+            .scalar => |thin| {
+                if (thin.kind.primitive != .pointer) return l.malformed("a dereference of a `{s}`", .{@tagName(thin.kind.primitive)});
+                // An `extern type`: what is behind the pointer is for foreign code to know.
+                if (unsized(layout)) return l.unsupported("a place of the type `{s}`, whose size nothing here knows", .{name});
+                return .{ .address = .{ .pointer = thin.value, .alignment = layout.@"align" }, .ty = target, .layout = layout };
+            },
+            .memory => |wide| {
+                const pair = switch (wide.layout.repr) {
+                    .scalar_pair => |pair| pair,
+                    else => return l.malformed("a dereference of a value that is no pointer", .{}),
+                };
+                if (!unsized(layout)) return l.malformed("a wide pointer to `{s}`, which has a size", .{name});
+                // What the pointer carries is a length only for these; for a `dyn Trait` it is a vtable, which also
+                // knows the alignment the layout cannot.
+                switch (l.typeOf(f.tailOf(target)).kind) {
+                    .slice, .str => {},
+                    else => return l.unsupported("a place of the type `{s}`", .{name}),
+                }
+                const address, const len = try f.loadPair(wide.address, pair);
+                if (address.kind.primitive != .pointer or len.kind.primitive != .int) {
+                    return l.malformed("a pointer to `{s}` that is not an address and a length", .{name});
+                }
+                return .{ .address = .{ .pointer = address.value, .alignment = layout.@"align" }, .ty = target, .layout = layout, .extra = len };
+            },
+            .nothing => return l.malformed("a dereference of a value without a size", .{}),
+        }
+    }
+
     /// The field of a struct, a tuple or a union.
     fn fieldOf(f: *Function, parent: Place, index: u32, ty: schema.TypeId) codegen.Error!Place {
         const l = f.l;
-        const layout = try f.sized(ty, "a field");
+        const layout = try f.laidOut(ty, "a field");
         if (parent.layout.variants != .single) return l.unsupported("a field of a value that is not a struct, a tuple or a union", .{});
         const offset = switch (parent.layout.fields) {
             .arbitrary => |fields| if (index < fields.offsets.len) fields.offsets[index] else {
@@ -747,6 +974,12 @@ const Function = struct {
             },
             else => |other| return l.unsupported("a field of a value laid out as `{s}`", .{@tagName(other)}),
         };
+        if (unsized(layout)) {
+            // Only the last field of a struct may have no size, and what a pointer to the struct carries is about
+            // that field.
+            const extra = parent.extra orelse return l.malformed("an unsized field of a value that has a size", .{});
+            return .{ .address = parent.address.offset(l, offset), .ty = ty, .layout = layout, .extra = extra };
+        }
         if (offset > parent.layout.size or parent.layout.size - offset < layout.size) {
             return l.malformed("a field that does not fit into its value", .{});
         }
@@ -756,8 +989,9 @@ const Function = struct {
     fn arrayOf(f: *Function, place: Place) codegen.Error!Array {
         const l = f.l;
         const ty = l.typeOf(place.ty);
-        const element = switch (ty.kind) {
-            .array => |array| array.elem,
+        const element, const is_slice = switch (ty.kind) {
+            .array => |array| .{ array.elem, false },
+            .slice => |slice| .{ slice.elem, true },
             else => return l.unsupported("an element of `{s}`", .{ty.name}),
         };
         const shape = switch (place.layout.fields) {
@@ -765,12 +999,19 @@ const Function = struct {
             else => return l.malformed("`{s}` is not laid out as an array", .{ty.name}),
         };
         const layout = try f.sized(element, "an element");
-        const fits = layout.size <= shape.stride and (shape.count == 0 or shape.stride <= place.layout.size / shape.count);
-        if (!fits) return l.malformed("the elements of `{s}` do not fit into it", .{ty.name});
-        return .{ .element = element, .layout = layout, .stride = shape.stride, .count = shape.count };
+        if (layout.size > shape.stride) return l.malformed("the elements of `{s}` overlap", .{ty.name});
+        if (is_slice) {
+            const len = place.extra orelse return l.malformed("a slice without a length", .{});
+            return .{ .element = element, .layout = layout, .stride = shape.stride, .count = .{ .carried = len } };
+        }
+        if (shape.count != 0 and shape.stride > place.layout.size / shape.count) {
+            return l.malformed("the elements of `{s}` do not fit into it", .{ty.name});
+        }
+        return .{ .element = element, .layout = layout, .stride = shape.stride, .count = .{ .fixed = shape.count } };
     }
 
     fn readPlace(f: *Function, place: Place) codegen.Error!Read {
+        if (unsized(place.layout)) return f.l.unsupported("a value of the unsized type `{s}`", .{f.l.typeOf(place.ty).name});
         if (place.layout.size == 0) return .nothing;
         return switch (place.layout.repr) {
             .scalar => |repr| .{ .scalar = try f.loadScalar(place.address, repr.scalar) },
@@ -780,6 +1021,7 @@ const Function = struct {
 
     fn write(f: *Function, into: Place, value: Read) codegen.Error!void {
         const l = f.l;
+        if (unsized(into.layout)) return l.unsupported("a value of the unsized type `{s}`", .{l.typeOf(into.ty).name});
         switch (value) {
             .nothing => if (into.layout.size != 0) {
                 return l.malformed("a value without a size is assigned to a place that has one", .{});
@@ -839,7 +1081,12 @@ const Function = struct {
     }
 };
 
-/// The element of an array at an index known only when the program runs.
+/// The element of an array at an index known now.
+fn nth(l: *const Lowering, place: Place, array: Array, index: u64) Place {
+    return .{ .address = place.address.offset(l, index * array.stride), .ty = array.element, .layout = array.layout };
+}
+
+/// The element of an array or a slice at an index that is a value of the program.
 fn elementAt(l: *const Lowering, place: Place, array: Array, index: llvm.LLVMValueRef) Place {
     var indices = [_]llvm.LLVMValueRef{index};
     return .{

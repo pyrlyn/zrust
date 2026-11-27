@@ -32,14 +32,19 @@ Phases A0–A8 come from [`docs/AGENT_PROMPT.md`](../docs/AGENT_PROMPT.md) §9. 
 - **Every local has a stack slot**, zero-sized ones too, so every place has an address and `&` needs no special case. Two kinds of locals use memory that is already there: an argument passed by a pointer, and the return place of a result returned through `sret`.
 - **Reading gives nothing, a scalar, or a place.** A type without a size reads as nothing; a scalar is loaded; anything else, a pair of scalars included, stays where it is and is copied with `memcpy` when it is assigned. Treating a pair as bytes costs nothing after `sroa` and leaves one way to move a value.
 - **Pass modes are spelled the way rustc's LLVM backend spells them**, because the other side of a call may be compiled by it: a `pair` is two parameters, or a `{ a, b }` result; a `cast` is one register type, an array of them, or a struct of the prefix registers and the rest, and the value goes through a stack slot of that type, which may be larger or smaller than the value; `indirect` is a pointer, with `sret` on a result and `byval` on an `on_stack` argument. The caller copies a value it passes by pointer unless the MIR moves it.
-- **A constant that is not a scalar is a private global** holding its bytes, `undef` where the constant is not initialised. Constants with pointers in them wait for the allocations they point into.
-- **Phase A5 is done in parts**, one pull request each: structs, tuples, arrays and thin references first (T6); then statics, constants with relocations and wide pointers; enums; drops, vtables and the panic functions.
+- **A constant that is not a scalar is a private global** holding its bytes, `undef` where the constant is not initialised.
+- **A static is a global typed by the shape of its initializer**: `[n x i8]` when it holds no pointers, otherwise a packed struct of byte runs and `ptr`s. Every static of a unit is declared before any initializer or body is lowered, so statics may point at each other and at functions. A pointer into the middle of an allocation is a byte `getelementptr` off its global, without `inbounds`: a constant may hold a pointer that lies outside the allocation it was computed from.
+- **Anonymous memory is one private global per allocation**, registered before its initializer is computed, so allocations may point at each other too. It is `unnamed_addr constant` only when rustc says it is immutable: memory a `static mut` writes through keeps its identity. A pointer into an allocation of zero bytes is the integer `align + offset`, as rustc defines it.
+- **A static the unit only mentions is `external global [0 x i8]`.** The ZRMIR gives it no type, so nothing is promised about its size or its alignment.
+- **A place carries the length of the wide pointer it was reached through.** Dereferencing a pointer to a slice or a `str` gives a place with that length; a field that is the unsized tail of a struct inherits it; `ref` and `address_of` put it back next to the address. A wide pointer itself is a pair of scalars and lives in memory like any other pair.
+- **The length an unsizing cast adds comes from the types**: the cast of `[T; N]` to `[T]`, also as the tail of a struct, stores the `N` of the source's layout.
+- **Phase A5 is done in parts**, one pull request each: structs, tuples, arrays and thin references first (T6); then statics, constants with relocations, slices and `str` (T7); enums; drops, vtables and the panic functions.
 - **A function is declared when something first refers to it**, with the ABI its symbol names. Defining it later adds the linkage, the visibility and the body, so a module declares only what it uses.
 - **A failed assertion is a trap, for now.** `Assert` branches to one `llvm.trap` block per function. Calling the panic function needs its `&Location` argument, a constant with relocations (A5). Under `-C panic=abort` the program still dies, only without running its panic handler; where panics unwind an assertion is refused, because there a trap would be another program.
 - **The run-pass runner knows how a program dies.** `expect-panic` expects `SIGABRT` from stock rustc's build (the test's panic handler calls `abort`) and the host's trap signal from ZRust's: `SIGTRAP` on aarch64, `SIGILL` on x86_64.
 - **`zrust cargo` is postponed** until a crate can be built at all (A6 at the earliest).
 
-## Known gaps after A5, part 1
+## Known gaps after A5, part 2
 
 What the code generator accepts today is compiled correctly but plainly. Missing, with the phase that needs it:
 
@@ -47,9 +52,10 @@ What the code generator accepts today is compiled correctly but plainly. Missing
 - `dso_local`, `unnamed_addr` on functions and the "PIC Level" / "PIE Level" module flags. A5.
 - Calling conventions other than C and Rust; C-variadic functions; the pass mode of a value without a known size; a `cast` pass mode with `i32` padding, an offset of the rest or vector registers; the `align` of a pointer that is passed directly. A5–A7.
 - A failed assertion traps instead of calling its panic function, and is refused where panics unwind. A5–A6.
-- Wide pointers and what they point at: slices, `str`, trait objects, unsizing casts, `len`, `ptr_metadata`, `subslice` and elements counted from the end. Statics and constants with pointers in them. Enums: `discriminant`, `set_discriminant`, `downcast`, and the `cmp` operator, whose result is one. Drops. A transmute or a `Box` dereference of a value that is not a scalar. A5.
+- Trait objects: vtables, calls through them, the unsizing cast to one, and constants that hold a `TypeId`. Comparing wide pointers. A part of an array (`[_, rest @ ..]` of a `[T; N]`; of a slice it works). The `len` rvalue, which the pinned rustc does not emit. Enums: `discriminant`, `set_discriminant`, `downcast`, and the `cmp` operator, whose result is one. Drops. A `Box` dereference of a value that is not a scalar. A5.
+- Thread-local statics. Statics get a linkage, a visibility and an alignment and nothing else: no link section, no `used`, no `dso_local`. A constant that is not a scalar is a new global at every use. A5–A7.
 - Filling an array (`[value; N]`) is a loop over its elements, also where a `memset` would do.
-- Intrinsics (`core::intrinsics` and `llvm.*` calls), calls that pass their caller's location, `rust-call`, cleanup blocks. A5–A7.
+- Intrinsics (`core::intrinsics` and `llvm.*` calls), calls that pass their caller's location, `rust-call`, cleanup blocks. These still stop range indexing (`&a[1..3]`) and `ptr.add` in a debug build, which report their caller, and `==` on `str`, which is `compare_bytes`. A5–A7.
 - `-C target-feature` is refused by the shim. A7.
 - No allocator module, and `--emit=metadata`-only builds are not special-cased. A6.
 - `zrust-codegen --emit=bc`.

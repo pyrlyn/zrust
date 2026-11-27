@@ -2,8 +2,7 @@
 
 Approved work that is not in `plan/` yet. Phases and their exit criteria are defined in [`docs/AGENT_PROMPT.md`](docs/AGENT_PROMPT.md) §9.
 
-- **Phase A5 — aggregates and references**, the parts after the first (structs, tuples, arrays and thin references):
-  - statics, constant allocations with relocations, wide pointers, slices and `str`, unsizing casts;
+- **Phase A5 — aggregates and references**, the parts after the first two (structs, tuples, arrays and thin references; statics, constants with pointers, slices and `str`):
   - enums: niche and tagged layouts, `Discriminant`, `SetDiscriminant`, `Downcast`, and the `cmp` operator, whose result is one;
   - drops through `drop_in_place`, vtables and `dyn Trait` calls, and the panic functions a failed assertion calls.
 - **Phase A6 — std hello world.** Entry shim, allocator shim, linking against the prebuilt std with `panic=abort`.

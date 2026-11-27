@@ -21,25 +21,6 @@ pub fn declare(l: *const Lowering, name: []const u8, fn_abi: *const schema.FnAbi
     return value;
 }
 
-/// Gives a declared function what only its definition knows.
-pub fn define(value: llvm.LLVMValueRef, item: *const schema.Function) void {
-    llvm.LLVMSetLinkage(value, switch (item.linkage) {
-        .external => llvm.LLVMExternalLinkage,
-        .available_externally => llvm.LLVMAvailableExternallyLinkage,
-        .link_once_any => llvm.LLVMLinkOnceAnyLinkage,
-        .link_once_odr => llvm.LLVMLinkOnceODRLinkage,
-        .weak_any => llvm.LLVMWeakAnyLinkage,
-        .weak_odr => llvm.LLVMWeakODRLinkage,
-        .internal => llvm.LLVMInternalLinkage,
-        .external_weak => llvm.LLVMExternalWeakLinkage,
-    });
-    llvm.LLVMSetVisibility(value, switch (item.visibility) {
-        .default => llvm.LLVMDefaultVisibility,
-        .hidden => llvm.LLVMHiddenVisibility,
-        .protected => llvm.LLVMProtectedVisibility,
-    });
-}
-
 /// How a value travels between a caller and a callee, in LLVM's terms.
 pub const Passed = union(enum) {
     /// Not at all: the value has no size.
