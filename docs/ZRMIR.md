@@ -496,7 +496,8 @@ Versions so far:
 
 What version 2 leaves out, and the phase (`docs/AGENT_PROMPT.md` §9) that needs it:
 
-- **Unsizing casts** (`unsize`) do not say what metadata the wide pointer gets: the array length or the vtable. A5.
+- **Unsizing casts** (`unsize`) do not say what metadata the wide pointer gets. For an array that becomes a slice `zrust-codegen` reads the length off the two types; a cast to a trait object needs its vtable named. A5.
+- **A static the unit only mentions** has no type, so its size and alignment are unknown to the code generator.
 - **Assertions** do not name the panic functions to call; `zrust-codegen` ends the program with a trap instead. A5.
 - **Virtual drops** carry no ABI of the drop function. A5.
 - **The entry point** does not name the `lang_start` function, and there is no allocator shim table. A6.
