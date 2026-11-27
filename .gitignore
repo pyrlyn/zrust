@@ -4,3 +4,4 @@ zig-out/
 target/
 *.zrmir
 .DS_Store
+.rtok/

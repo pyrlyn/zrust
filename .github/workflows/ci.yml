@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS arm64 and Linux x86_64.
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Zig and LLVM (mise.toml)
+        uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+
+      - name: Install the pinned Rust nightly (rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - name: Build
+        run: zig build
+
+      - name: Smoke test
+        run: |
+          zig-out/bin/zrust --version
+          zig-out/bin/zrust-codegen --version
+          ls -l zig-out/lib

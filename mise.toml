@@ -1,0 +1,4 @@
+[tools]
+zig = "0.17.1"
+# Headers, llvm-config and libLLVM-22. The major version must match the LLVM Zig itself is built against.
+"conda:llvmdev" = "22.1.8"
