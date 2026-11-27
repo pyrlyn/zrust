@@ -153,8 +153,8 @@ fn rebuilt(values: &[u32]) -> *const [u32] {
 }
 
 #[inline(never)]
-fn as_bytes(values: &[u32]) -> *const [u8] {
-    values as *const [u32] as *const [u8]
+fn as_signed(values: &[u32]) -> *const [i32] {
+    values as *const [u32] as *const [i32]
 }
 
 #[inline(never)]
@@ -239,7 +239,7 @@ pub extern "C" fn main(one: i32, _arguments: *const *const u8) -> i32 {
     if shorter.len() != 2 || sum(unsafe { &*shorter }) != 7 {
         return 15;
     }
-    if as_bytes(&items).len() != 3 {
+    if as_signed(&items).len() != 3 {
         return 16;
     }
     if count(&[(), (), ()]) != 3 {
